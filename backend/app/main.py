@@ -4,9 +4,13 @@ from typing import Optional
 
 from fastapi import FastAPI
 
+from backend.app.api import documents
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import configure_logging
 from backend.app.db.session import Database
+
+API_PREFIX = "/api/v1"
 def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -20,12 +24,22 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
                 yield
         finally:
             await app.state.database.close()
-    app = FastAPI(title="My FastAPI Application")
+    application = FastAPI(
+        title="Agentic RAG Knowledge Assistant",
+        description="Source-grounded document question answering API",
+        version="0.1.0",
+        docs_url=f"{API_PREFIX}/docs",
+        redoc_url=f"{API_PREFIX}/redoc",
+        openapi_url=f"{API_PREFIX}/openapi.json",
+        lifespan=lifespan,
+    )
+    register_exception_handlers(application)
+    application.include_router(documents.router, prefix=API_PREFIX)
     
-    @app.get("/")
+    @application.get("/")
     async def read_root():
         return {"message": "Welcome to My FastAPI Application!"}
 
-    return app
+    return application
 
 app = create_app()
