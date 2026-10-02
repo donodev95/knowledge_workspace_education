@@ -8,7 +8,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.responses import JSONResponse
 from backend.app.auth.dependencies import get_current_user
 
-from backend.app.api import auth, documents, papers, source_item_links
+from backend.app.api import auth, documents, papers, source_item_links, threads
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import configure_logging
@@ -49,6 +49,7 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
     application.include_router(documents.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     application.include_router(papers.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     application.include_router(source_item_links.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
+    application.include_router(threads.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     
     @application.get(f"{API_PREFIX}/openapi.json", include_in_schema=False, dependencies=[Depends(get_current_user)])
     async def protected_openapi():

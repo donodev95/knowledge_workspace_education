@@ -10,6 +10,7 @@ from backend.app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from backend.app.models.message import Message
+    from backend.app.models.paper import Paper
     from backend.app.models.thread import ConversationThread
 
 
@@ -28,5 +29,8 @@ class User(TimestampMixin, Base):
         back_populates="owner", cascade="all, delete-orphan", passive_deletes=True
     )
     messages: Mapped[list["Message"]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan", passive_deletes=True
+    )
+    papers: Mapped[list["Paper"]] = relationship(
         back_populates="owner", cascade="all, delete-orphan", passive_deletes=True
     )

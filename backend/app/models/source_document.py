@@ -1,11 +1,14 @@
 """An uploaded version of a source belonging to an academic paper."""
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 from sqlalchemy import JSON, BigInteger, CheckConstraint, Enum, ForeignKey, Index, String, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.app.db.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from backend.app.models.paper import Paper
 
 
 class DocumentType(StrEnum):
@@ -33,6 +36,7 @@ class SourceDocument(TimestampMixin, Base):
     )
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     paper_id: Mapped[UUID] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
+    paper: Mapped["Paper"] = relationship(back_populates="documents")
     
     document_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType, native_enum=False, create_constraint=True, name="source_document_type", values_callable=lambda e: [v.value for v in e]))
     # Assessment number is the number that appears in the assessment brief and rubric titles, e.g. "Assessment 1" or "Assessment 2". It is only applicable to assessment briefs and rubrics, not component overviews.

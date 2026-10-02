@@ -350,8 +350,11 @@ function Dashboard({
   }
   async function uploadDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || !selectedPaper)
-      return setError("Choose a paper and a file before uploading.");
+    if (!selectedPaper)
+      return setError(
+        "Select a paper before uploading. Every document must belong to a paper.",
+      );
+    if (!file) return setError("Choose a file before uploading.");
     setBusy(true);
     setError("");
     setMessage("");
@@ -485,7 +488,11 @@ function Dashboard({
                     value={selectedPaper}
                     onChange={(event) => setSelectedPaper(event.target.value)}
                   >
-                    <option value="">Select a paper</option>
+                    <option value="">
+                      {papers.length
+                        ? "Select a paper"
+                        : "Create a paper first"}
+                    </option>
                     {papers.map((paper) => (
                       <option key={paper.id} value={paper.id}>
                         {paper.code} · {paper.title}
@@ -595,7 +602,7 @@ function Dashboard({
                 )}
                 <button
                   className="primary-button upload-button"
-                  disabled={busy || !file || !selectedPaper}
+                  disabled={busy}
                 >
                   {busy ? "Uploading..." : "Upload document"}
                   <ArrowUpRight size={17} />

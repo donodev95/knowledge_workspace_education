@@ -1,8 +1,13 @@
-"""Stable academic paper identity, independent of uploaded files."""
+"""Stable user-owned academic identity, independent of uploaded files."""
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 from sqlalchemy import ForeignKey, String, UniqueConstraint, Uuid
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.app.db.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from backend.app.models.source_document import SourceDocument
+    from backend.app.models.user import User
 
 
 class Paper(TimestampMixin, Base):
@@ -14,3 +19,8 @@ class Paper(TimestampMixin, Base):
     __table_args__ = (UniqueConstraint("owner_id", "code", name="uq_papers_owner_code"),)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    owner: Mapped["User | None"] = relationship(back_populates="papers")
+    documents: Mapped[list["SourceDocument"]] = relationship(
+        back_populates="paper", cascade="all, delete-orphan", passive_deletes=True
+    )

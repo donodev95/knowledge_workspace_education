@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class ConversationThread(TimestampMixin, Base):
-    """A user-owned conversation and document scope."""
+    """A user-owned conversation independent of document ownership."""
 
     __tablename__ = "conversation_threads"
     __table_args__ = (Index("ix_conversation_threads_owner_created", "owner_id", "created_at"),)

@@ -15,7 +15,7 @@ from backend.app.core.config import Settings
 from backend.app.repositories.papers import get_a_paper
 from backend.app.repositories.source_documents import get_a_document
 from backend.app.ingestion.converter import validate_upload, convert_document
-from backend.app.ingestion.embedding import EmbeddingProvider, create_embedding_provider, validate_embeddings
+from backend.app.ingestion.embeddings import EmbeddingProvider, create_embedding_provider, validate_embeddings
 from backend.app.ingestion.source_items import extract_source_items
 from backend.app.models import Paper, SourceDocument, SourceItem, DocumentType, DocumentStatus, IngestionJob, IngestionJobStatus
 from backend.app.models.source_item import EMBEDDING_DIMENSION
