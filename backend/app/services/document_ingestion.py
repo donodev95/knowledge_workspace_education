@@ -1,308 +1,176 @@
-
-from dataclasses import asdict, dataclass
+"""Source extraction is committed before optional embedding begins."""
+from dataclasses import dataclass
+import hashlib
 import json
-from pathlib import Path
-from typing import Any
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-import tiktoken
-from backend.app.core.config import Settings
-from backend.app.ingestion.chunking import PreparedChunk, get_page_number, get_section_title, hash_text
-from backend.app.ingestion.embedding import EmbeddingProvider, validate_embeddings
-from backend.app.ingestion.normalization import normalize_text
-from backend.app.models.document import Document, DocumentStatus
-from backend.app.ingestion.converter import validate_upload, convert_document
-from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
-from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
-from docling_core.types.doc.common.reference import RefItem
-from backend.app.models.document_chunk import DocumentChunk
-from backend.app.models.learning_outcome_chunk import LearningOutcomeChunk
-from backend.app.models.ingestion_job import IngestionJob, IngestionJobStatus
 import logging
+from pathlib import Path
+from uuid import UUID, uuid4
+import tiktoken
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
+from docling_core.transforms.chunker.tokenizer.openai import OpenAITokenizer
+
+from backend.app.core.config import Settings
+from backend.app.repositories.papers import get_a_paper
+from backend.app.repositories.source_documents import get_a_document
+from backend.app.ingestion.converter import validate_upload, convert_document
+from backend.app.ingestion.embedding import EmbeddingProvider, create_embedding_provider, validate_embeddings
+from backend.app.ingestion.source_items import extract_source_items
+from backend.app.models import Paper, SourceDocument, SourceItem, DocumentType, DocumentStatus, IngestionJob, IngestionJobStatus
+from backend.app.models.source_item import EMBEDDING_DIMENSION
 
 logger = logging.getLogger(__name__)
-OUTPUT_DIR = Path(__file__).resolve().parents[3] / "output"
+OUTPUT_DIR = Path(__file__).resolve().parents[3] / 'output'
 
 
-def _prepare_chunk(
-    *,
-    content: str,
-    chunk_index: int,
-    page_number: int | None,
-    section_title: str | None,
-    metadata: dict[str, Any],
-    encoding: tiktoken.Encoding,
-) -> PreparedChunk:
-    """Normalize content and calculate the derived fields for a prepared chunk."""
-    normalized_content = normalize_text(content)
-    return PreparedChunk(
-        chunk_index=chunk_index,
-        page_number=page_number,
-        section_title=section_title,
-        content=content,
-        normalized_content=normalized_content,
-        content_hash=hash_text(normalized_content),
-        token_count=len(encoding.encode(normalized_content)),
-        metadata=metadata.copy(),
-    )
-
-
-def _save_ingestion_json(filename: str, suffix: str, payload: Any) -> None:
-    """Write a readable JSON artifact under the project root's output folder."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / f"{Path(filename).stem}_{suffix}.json"
-    output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class IngestionResult:
-    """Document ingestion result including owner-scoped duplicate state."""
-    document: Document
-    duplicate: bool
-    chunks_created: int
+    source_document: SourceDocument
+    items_created: int
+    embedding_error: str | None = None
 
 
 class IngestionUnavailableError(ValueError):
-    """Raised after an indexing failure has been recorded durably."""
+    pass
+
+
+async def embed_source_document(session: AsyncSession, document_id: UUID, settings: Settings,
+                                provider: EmbeddingProvider | None = None, *, owner_id: UUID) -> str | None:
+    """Embed pending items; failures leave all extracted text available for retry."""
+    document = await get_a_document(session, document_id, owner_id)
+    job = (await session.execute(select(IngestionJob).where(IngestionJob.source_document_id == document_id).order_by(IngestionJob.created_at.desc()))).scalars().first()
+    job_id = job.id if job else None
+    try:
+        items = list((await session.execute(select(SourceItem).where(SourceItem.source_document_id == document_id, SourceItem.embedding.is_(None)).order_by(SourceItem.chunk_index))).scalars())
+        if items:
+            if settings.embedding_dimension != EMBEDDING_DIMENSION:
+                raise ValueError('Embedding dimension must match the 1024-dimensional source item schema')
+            provider = provider or create_embedding_provider(settings)
+            model_name = getattr(provider, 'model', None) or settings.embedding_model
+            if not model_name:
+                raise ValueError('Embedding model name is required')
+            vectors = await provider.embed_documents([item.normalized_content for item in items])
+            validate_embeddings(vectors, len(items), EMBEDDING_DIMENSION)
+            for item, vector in zip(items, vectors, strict=True):
+                item.embedding = vector
+                item.embedding_model = model_name
+        document.status = DocumentStatus.COMPLETED
+        if job:
+            job.status = IngestionJobStatus.COMPLETED
+            job.error_message = None
+        await session.commit()
+        return None
+    except Exception:
+        logger.exception('Embedding failed; extracted source items are retained')
+        await session.rollback()
+        document = await session.get(SourceDocument, document_id)
+        job = await session.get(IngestionJob, job_id) if job_id else None
+        if document:
+            document.status = DocumentStatus.EMBEDDING_FAILED
+        if job:
+            job.status = IngestionJobStatus.FAILED
+            job.error_message = 'Embedding failed; extracted items retained for retry'
+        await session.commit()
+        return 'Embedding failed; extracted items retained for retry'
+
 
 async def ingest_document(
-    session: AsyncSession,
-    *,
-    filename: str,
-    mime_type: str,
-    data: bytes,
+    session: AsyncSession, *, 
+    paper_id: UUID,
+    owner_id: UUID, 
+    document_type: DocumentType,
+    filename: str, 
+    mime_type: str, 
+    data: bytes, 
     settings: Settings,
-    embedding_provider: EmbeddingProvider,
-    display_name: str | None = None,
-    stored_mime_type: str | None = None,
-    source_metadata: dict[str, Any] | None = None,
+    assessment_number: int | None = None, 
+    replaces_document_id: UUID | None = None,
+    embed: bool = True, 
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> IngestionResult:
-    """Index a document while durably recording running and failed job states."""
-    # ----------------- 1. Validate the document ----------------- 
-    extension = validate_upload(
-        filename,
-        mime_type,
-        data,
-        max_size_bytes=settings.max_upload_size_mb * 1024 * 1024,
-    )
     
-    # -----------------  2. Convert the Bytes to a DoclingDocument ----------------- 
-    docling_document = convert_document(extension, filename, data, settings.enable_ocr)
-    document_payload = docling_document.export_to_dict()
-    _save_ingestion_json(filename, "docling_document", document_payload)
+    document_type = DocumentType(document_type)
     
-    # ----------------- 3. Deduplicate Document -----------------
-    binary_hash = document_payload.get("origin", {}).get("binary_hash")
-    if binary_hash is None:
-        raise ValueError("Document origin is missing binary_hash")
-
-    document_hash = str(binary_hash)
-    # duplicate = await find_document_by_hash(session, owner_id, document_hash)
-    # if duplicate is not None:
-    #     return IngestionResult(duplicate, duplicate=True, chunks_created=0)
+    # Validate the paper and document metadata before proceeding with ingestion.
+    await get_a_paper(session, paper_id, owner_id)
+    if document_type == DocumentType.COMPONENT_OVERVIEW and assessment_number is not None:
+        raise ValueError('Component overviews cannot have an assessment number')
+    if document_type != DocumentType.COMPONENT_OVERVIEW and (assessment_number is None or assessment_number < 1):
+        raise ValueError('Assessment briefs and rubrics require a positive assessment_number')
+    if replaces_document_id:
+        previous = await session.get(SourceDocument, replaces_document_id)
+        if previous is None or (previous.paper_id, previous.document_type, previous.assessment_number) != (paper_id, document_type, assessment_number):
+            raise ValueError('Replacement must refer to the same paper, document type, and assessment number')
     
-    # ----------------- 4. Prepare the Document for Ingestion -----------------
-    safe_filename = Path(filename).name[:255]
+    # Validate the uploaded file.
+    extension = validate_upload(filename, mime_type, data, max_size_bytes=settings.max_upload_size_mb * 1024 * 1024)
     
-    metadata = dict(source_metadata or {})
-    metadata.update({"page_count": len(docling_document.pages), "file_extension": extension})
-    
-    document = Document(
-        # owner_id=owner_id,
-        # thread_id=thread_id,
-        original_filename=safe_filename,
-        display_name=(display_name or safe_filename)[:255],
-        mime_type=(stored_mime_type or mime_type).lower(),
-        file_size=len(data),
-        content_hash=str(document_hash),
-        status=DocumentStatus.PROCESSING,
-        metadata_json=metadata,
-    )
-    session.add(document)
-    
-    # ----------------- 5. Chunking  ----------------- 
-    encoding = tiktoken.encoding_for_model("gpt-4o")
-    
-    tokenizer = OpenAITokenizer(
-        tokenizer=encoding,
-        max_tokens=512,
-    )
-    
-    chunker = HybridChunker(tokenizer=tokenizer)
-    raw_chunks = list(
-        chunker.chunk(dl_doc=docling_document)
-    )
-    
-    other_chunks: list[PreparedChunk] = []
-    learning_outcome_chunks: list[PreparedChunk] = []
-    # Create PreparedChunk objects for later embedding and storage in the database.
-    for index, chunk in enumerate(raw_chunks):
-        headings = getattr(chunk.meta, "headings", None) or []
-        section_title = get_section_title(chunk)
-        metadata = {
-            "headings": headings,
-            "filename": filename,
-            "mimetype": mime_type,
-        }
-        other_chunks.append(
-            _prepare_chunk(
-                content=chunker.contextualize(chunk),
-                chunk_index=index,
-                page_number=get_page_number(chunk),
-                section_title=section_title,
-                metadata=metadata,
-                encoding=encoding,
-            )
+    # Build the document and ingestion job records, and commit them to the database before proceeding with extraction.
+    document = SourceDocument(
+        id=uuid4(), 
+        paper_id=paper_id, 
+        document_type=document_type,
+        assessment_number=assessment_number, 
+        replaces_document_id=replaces_document_id,
+        original_filename=Path(filename).name[:255], 
+        display_name=Path(filename).name[:255],
+        mime_type=mime_type.lower(), 
+        file_size=len(data), 
+        content_hash=hashlib.sha256(data).hexdigest(),
+        status=DocumentStatus.PROCESSING, 
+        metadata_json={'file_extension': extension}
         )
-
-        # Also extract individual items from Learning Outcomes sections.
-        is_learning_outcome = any(
-            " ".join(normalize_text(heading).casefold().split()) == "learning outcomes"
-            for heading in headings
-        )
-        if not is_learning_outcome:
-            continue
-
-        for item in getattr(chunk.meta, "doc_items", []) or []:
-            # Resolve the full source item to retrieve its original text.
-            source_item = RefItem.model_validate({"$ref": item.self_ref}).resolve(
-                docling_document
-            )
-            item_text = getattr(source_item, "text", None)
-            if item_text is None:
-                # Preserve non-text items as JSON content.
-                item_text = json.dumps(
-                    source_item.model_dump(
-                        mode="json", by_alias=True, serialize_as_any=True
-                    ),
-                    ensure_ascii=False,
-                )
-            learning_outcome_chunks.append(
-                _prepare_chunk(
-                    content=item_text,
-                    chunk_index=len(learning_outcome_chunks),
-                    page_number=min(
-                        (prov.page_no for prov in source_item.prov), default=None
-                    ),
-                    section_title=section_title,
-                    metadata=metadata,
-                    encoding=encoding,
-                )
-            )
-    _save_ingestion_json(
-        filename,
-        "learning_outcome_chunks",
-        [asdict(chunk) for chunk in learning_outcome_chunks],
-    )
-    # Keep the destination model paired with each chunk throughout embedding.
-    chunks_to_store = [
-        *((DocumentChunk, chunk) for chunk in other_chunks),
-        *((LearningOutcomeChunk, chunk) for chunk in learning_outcome_chunks),
-    ]
-    total_chunks = len(chunks_to_store)
-    # ----------------- 6. Storing Ingestion Job -----------------
-    try:
-        await session.flush() # sends pending SQL statements to the database without committing the transaction.
-        job = IngestionJob(
-            document_id=document.id,
-            # owner_id=owner_id,
-            status=IngestionJobStatus.RUNNING,
-            details_json={
-                "chunks": total_chunks,
-                "document_chunks": len(other_chunks),
-                "learning_outcome_chunks": len(learning_outcome_chunks),
-            },
-        )
-        session.add(job) # Put the job into SqlAlchemy's session, but it won't be in the database until we commit.
-        await session.commit() # the ingestion_job row is now durably stored in the database with status RUNNING.
-    except IntegrityError:
-        await session.rollback()
-        # duplicate = await find_document_by_hash(session, owner_id, document_hash)
-        duplicate = None
-        if duplicate is not None: # Race condition: another ingestion job for the same document hash was created after we checked for duplicates but before we committed our own ingestion job.
-            return IngestionResult(duplicate, duplicate=True, chunks_created=0)
-        raise
+    job = IngestionJob(id=uuid4(), owner_id=owner_id, source_document_id=document.id, status=IngestionJobStatus.RUNNING, details_json={})
     
-    # Cache IDs before rollback can expire ORM attributes.
+    # Cache the document and job IDs for use in the exception handler, then commit them to the database.
     document_id, job_id = document.id, job.id
-    # ----------------- 7. Embedding and storing prepared chunks -----------------
+    session.add(document)
+    await session.flush()
+    session.add(job)
+    await session.commit()
     try:
-        # Embed all chunks in one batch
-        vectors = await embedding_provider.embed_documents(
-            [
-                chunk.normalized_content
-                for _, chunk in chunks_to_store
-            ]
-        ) if chunks_to_store else []
-
-        validate_embeddings(
-            vectors,
-            total_chunks,
-            settings.embedding_dimension,
-        )
-
-        # Build ORM objects
-        db_chunks = [
-            model(
-                document_id=document_id,
-                # owner_id=owner_id,
-                chunk_index=chunk.chunk_index,
-                page_number=chunk.page_number,
-                section_title=chunk.section_title,
-                content=chunk.content,
-                normalized_content=chunk.normalized_content,
-                content_hash=chunk.content_hash,
-                token_count=chunk.token_count,
-                embedding=vector,
-                metadata_json={
-                    **(source_metadata or {}),
-                    **chunk.metadata,
-                },
-            )
-            for (model, chunk), vector in zip(
-                chunks_to_store,
-                vectors,
-                strict=True,
-            )
-        ]
-
-        # Insert all chunks
-        session.add_all(db_chunks)
-
-        # Update ingestion status
-        document.status = DocumentStatus.COMPLETED
+        docling_document = convert_document(extension, filename, data, settings.enable_ocr)
+        encoding = tiktoken.encoding_for_model('gpt-4o')
+        chunker = HybridChunker(tokenizer=OpenAITokenizer(tokenizer=encoding, max_tokens=512))
+        items = extract_source_items(docling_document, list(chunker.chunk(dl_doc=docling_document)), chunker, encoding, document_id, document_type)
+        # Parents precede children; flush context before adding dependent items.
+        session.add_all([item for item in items if item.parent_item_id is None])
+        await session.flush()
+        session.add_all([item for item in items if item.parent_item_id is not None])
+        
+        document.status = DocumentStatus.EXTRACTED
+        document.metadata_json = {**document.metadata_json, 'page_count': len(docling_document.pages)}
+        
+        job.details_json = {'items': len(items), 'embedding_requested': embed}
         job.status = IngestionJobStatus.COMPLETED
-
         await session.commit()
-
     except Exception as exc:
-        logger.exception("Document indexing failed")
         await session.rollback()
-        failed_document = await session.get(
-            Document,
-            document_id,
-        )
-        failed_job = await session.get(
-            IngestionJob,
-            job_id,
-        )
-        if failed_document is not None:
-            failed_document.status = DocumentStatus.FAILED
-        if failed_job is not None:
-            failed_job.status = IngestionJobStatus.FAILED
-            failed_job.error_message = "Document indexing failed"
+        document = await session.get(SourceDocument, document_id)
+        job = await session.get(IngestionJob, job_id)
+        if document:
+            document.status = DocumentStatus.FAILED
+        if job:
+            job.status = IngestionJobStatus.FAILED
+            job.error_message = 'Source extraction failed'
         await session.commit()
-        raise IngestionUnavailableError(
-            "Document indexing failed"
-        ) from exc
-
-
+        raise IngestionUnavailableError('Source extraction failed') from exc
+    # Artifacts are diagnostic; their failure must not undo durable extraction.
+    try:
+        artifact_dir = OUTPUT_DIR / str(document_id)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / 'docling_document.json').write_text(json.dumps(docling_document.export_to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
+        (artifact_dir / 'source_items.json').write_text(json.dumps([
+            {'id': str(item.id), 'item_type': item.item_type.value, 'label': item.label,
+             'content': item.content, 'chunk_index': item.chunk_index, 'metadata': item.metadata_json}
+            for item in items], ensure_ascii=False, indent=2), encoding='utf-8')
+    except OSError:
+        logger.exception('Could not save diagnostic artifacts')
+    count = len(items)
+    error = await embed_source_document(session, document_id, settings, embedding_provider, owner_id=owner_id) if embed else None
+    document = await session.get(SourceDocument, document_id)
+    if document is None:
+        raise IngestionUnavailableError('Source document no longer exists')
     await session.refresh(document)
-
-    return IngestionResult(
-        document=document,
-        duplicate=False,
-        chunks_created=total_chunks,
-    )
+    return IngestionResult(source_document=document, items_created=count, embedding_error=error)

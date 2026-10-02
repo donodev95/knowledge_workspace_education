@@ -1,10 +1,10 @@
-"""Document ingestion job status model."""
+"""Source document ingestion job status model."""
 
 from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Enum, ForeignKey, Index, Text, Uuid
+from sqlalchemy import JSON, CheckConstraint, Enum, ForeignKey, Index, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,18 +21,16 @@ class IngestionJobStatus(StrEnum):
 
 
 class IngestionJob(TimestampMixin, Base):
-    """Observable ingestion attempt for one authorized document."""
+    """Observable ingestion attempt for one source document."""
 
     __tablename__ = "ingestion_jobs"
-    # __table_args__ = (Index("ix_ingestion_jobs_owner_created", "owner_id", "created_at"),)
-
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    document_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    owner_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    # owner_id: Mapped[UUID] = mapped_column(
-    #     Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    # )
+    source_document_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("source_documents.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     status: Mapped[IngestionJobStatus] = mapped_column(
         Enum(
             IngestionJobStatus,

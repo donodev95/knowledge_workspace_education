@@ -1,4 +1,4 @@
-"""Unicode-safe document normalization and deterministic hashing."""
+"""Unicode-safe paper normalization and deterministic hashing."""
 
 import hashlib
 import re

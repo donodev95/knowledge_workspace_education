@@ -10,3 +10,8 @@ def configure_logging(level: str) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         force=True,
     )
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a named logger using the application's logging configuration."""
+    return logging.getLogger(name)

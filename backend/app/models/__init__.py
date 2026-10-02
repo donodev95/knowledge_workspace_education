@@ -1,25 +1,29 @@
-"""SQLAlchemy models exported for Alembic discovery."""
+"""Active SQLAlchemy models exported for Alembic discovery."""
 
-from backend.app.models.document import Document, DocumentStatus
-from backend.app.models.document_chunk import DocumentChunk
-from backend.app.models.learning_outcome_chunk import LearningOutcomeChunk
+from backend.app.models.coverage_analysis import CoverageBatchAttempt
 from backend.app.models.ingestion_job import IngestionJob, IngestionJobStatus
-# from backend.app.models.user import User
-# from backend.app.models.message import Message, MessageRole
-# from backend.app.models.thread import ConversationThread
-# from backend.app.models.source_item import SourceItem, SourceItemStatus
+from backend.app.models.message import Message, MessageRole
+from backend.app.models.paper import Paper
+from backend.app.models.source_document import DocumentStatus, DocumentType, SourceDocument
+from backend.app.models.source_item import ItemType, SourceItem
+from backend.app.models.source_item_link import LinkStatus, SourceItemLink
+from backend.app.models.thread import ConversationThread
+from backend.app.models.user import User
 
 __all__ = [
-    "Document",
+    "CoverageBatchAttempt",
+    "User",
+    "ConversationThread",
+    "Message",
+    "MessageRole",
+    "Paper",
+    "SourceDocument",
+    "DocumentType",
     "DocumentStatus",
-    "DocumentChunk",
-    "LearningOutcomeChunk",
+    "SourceItem",
+    "ItemType",
+    "SourceItemLink",
+    "LinkStatus",
     "IngestionJob",
     "IngestionJobStatus",
-    # "User",
-    # "ConversationThread",
-    # "Message",
-    # "MessageRole",
-    # "SourceItem",
-    # "SourceItemStatus",
 ]

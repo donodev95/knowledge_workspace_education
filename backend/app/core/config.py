@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     postgres_db: str = "agentic_rag"
     database_url_override: SecretStr | None = Field(default=None, alias="DATABASE_URL")
     
+    jwt_secret: SecretStr = SecretStr("local-development-secret-change-me-32")
+    jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
+    access_token_expire_minutes: int = Field(default=60, ge=1, le=10080)
+
     llm_provider: str = "ollama"
     llm_model: str = ""
     llm_api_key: SecretStr | None = None
@@ -60,15 +64,6 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return normalized
 
-    # @field_validator("mcp_path")
-    # @classmethod
-    # def validate_mcp_path(cls, value: str) -> str:
-    #     """Require MCP mount paths to be absolute URL paths."""
-    #     if not value.startswith("/") or value == "/":
-    #         msg = "MCP_PATH must start with '/' and cannot be the root path"
-    #         raise ValueError(msg)
-    #     return value.rstrip("/")
-
     @field_validator("database_url_override", mode="before")
     @classmethod
     def normalize_database_url(cls, value: object) -> object:
@@ -79,23 +74,23 @@ class Settings(BaseSettings):
             return None
         return value
 
-    # @model_validator(mode="after")
-    # def validate_related_values(self) -> "Settings":
-    #     """Validate settings whose constraints depend on other settings."""
-    #     if self.chunk_overlap >= self.chunk_size:
-    #         msg = "CHUNK_OVERLAP must be smaller than CHUNK_SIZE"
-    #         raise ValueError(msg)
-    #     if self.embedding_dimension != 1024:
-    #         msg = "EMBEDDING_DIMENSION must be 1024 for the current database migration"
-    #         raise ValueError(msg)
-    #     insecure_secret = self.jwt_secret.get_secret_value() in {
-    #         "replace-with-secure-secret",
-    #         "local-development-secret-change-me-32",
-    #     }
-    #     if self.app_env == "production" and insecure_secret:
-    #         msg = "JWT_SECRET must be changed in production"
-    #         raise ValueError(msg)
-    #     return self
+    @model_validator(mode="after")
+    def validate_related_values(self) -> "Settings":
+        """Validate settings whose constraints depend on other settings."""
+        if self.chunk_overlap >= self.chunk_size:
+            msg = "CHUNK_OVERLAP must be smaller than CHUNK_SIZE"
+            raise ValueError(msg)
+        if self.embedding_dimension != 1024:
+            msg = "EMBEDDING_DIMENSION must be 1024 for the current database migration"
+            raise ValueError(msg)
+        insecure_secret = self.jwt_secret.get_secret_value() in {
+            "replace-with-secure-secret",
+            "local-development-secret-change-me-32",
+        }
+        if self.app_env == "production" and insecure_secret:
+            msg = "JWT_SECRET must be changed in production"
+            raise ValueError(msg)
+        return self
 
     @property
     def database_url(self) -> str:

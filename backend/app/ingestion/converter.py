@@ -24,7 +24,7 @@ SUPPORTED_MIME_TYPES = {
 }
 
 
-class DocumentValidationError(ValueError):
+class PaperValidationError(ValueError):
     """Raised when an upload is unsupported, empty, corrupt, or protected."""
 
 
@@ -40,37 +40,37 @@ def validate_upload(
     
 
     if extension not in SUPPORTED_MIME_TYPES:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "Supported file types are PDF, DOCX, and TXT"
         )
 
     if mime_type.lower() not in SUPPORTED_MIME_TYPES[extension]:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "File extension and MIME type do not match"
         )
 
     if not data:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "Uploaded file is empty"
         )
 
     if len(data) > max_size_bytes:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "Uploaded file exceeds the configured size limit"
         )
 
     if extension == ".pdf" and not data.startswith(b"%PDF-"):
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "Invalid PDF signature"
         )
 
     if extension == ".docx" and not data.startswith(b"PK"):
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "Invalid DOCX signature"
         )
 
     if extension == ".txt" and b"\x00" in data:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "TXT uploads cannot contain null bytes"
         )
 
@@ -100,12 +100,12 @@ def _extract_txt(
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "TXT uploads must use UTF-8 encoding"
         ) from exc
 
     if not text.strip():
-        raise DocumentValidationError(
+        raise PaperValidationError(
             "TXT does not contain text"
         )
 
@@ -156,6 +156,6 @@ def convert_document(
             data,
         )
 
-    raise DocumentValidationError(
+    raise PaperValidationError(
         "Unsupported file type"
     )
