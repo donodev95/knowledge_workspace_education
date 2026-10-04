@@ -6,9 +6,10 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.responses import JSONResponse
+from backend.app.agents.checkpoints import create_checkpointer
 from backend.app.auth.dependencies import get_current_user
 
-from backend.app.api import auth, documents, papers, source_item_links, threads
+from backend.app.api import auth, chat, documents, papers, source_item_links, threads
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.errors import register_exception_handlers
 from backend.app.core.logging import configure_logging
@@ -23,8 +24,8 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
         app.state.settings = settings
         app.state.database = Database(settings.database_url)
         try:
-            # async with create_checkpointer(settings) as checkpointer:
-            #     app.state.checkpointer = checkpointer
+            async with create_checkpointer(settings) as checkpointer:
+                app.state.checkpointer = checkpointer
                 yield
         finally:
             await app.state.database.close()
@@ -46,6 +47,7 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
     )
     register_exception_handlers(application)
     application.include_router(auth.router, prefix=API_PREFIX)
+    application.include_router(chat.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     application.include_router(documents.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     application.include_router(papers.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])
     application.include_router(source_item_links.router, prefix=API_PREFIX, dependencies=[Depends(get_current_user)])

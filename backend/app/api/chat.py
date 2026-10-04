@@ -32,17 +32,19 @@ async def chat(
     session: SessionDep,
 ) -> ChatResponse:
     """Answer from documents scoped to one owned conversation."""
+    logger.info("Chat request for thread %s by user %s", thread_id, user.id)
+    
     if await get_thread(session, user.id, thread_id) is None:
         raise ApplicationError(404, "thread_not_found", "Conversation not found")
-    question = payload.question.strip()
-    if not question:
+    query = payload.question.strip()
+    if not query:
         raise ApplicationError(422, "invalid_question", "Question cannot be blank")
     try:
         message, state = await answer_question(
             session,
             owner_id=user.id,
             thread_id=thread_id,
-            question=question,
+            query=query,
             settings=settings,
             checkpointer=checkpointer,
         )

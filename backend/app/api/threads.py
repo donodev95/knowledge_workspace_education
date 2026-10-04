@@ -6,6 +6,8 @@ from fastapi import APIRouter, Response, status
 
 # from backend.app.agents.checkpoints import checkpoint_thread_id
 # from backend.app.agents.dependencies import CheckpointerDep
+from backend.app.agents.checkpoints import checkpoint_thread_id
+from backend.app.agents.dependencies import CheckpointerDep
 from backend.app.auth.dependencies import CurrentUserDep
 from backend.app.core.errors import ApplicationError
 from backend.app.db.session import SessionDep
@@ -13,7 +15,6 @@ from backend.app.repositories import threads as thread_repository
 from backend.app.schemas.thread import ThreadCreate, ThreadPublic
 
 router = APIRouter(prefix="/threads", tags=["threads"])
-
 
 @router.post("", response_model=ThreadPublic, status_code=status.HTTP_201_CREATED)
 async def create_thread(
@@ -41,18 +42,18 @@ async def get_thread(thread_id: UUID, user: CurrentUserDep, session: SessionDep)
     return ThreadPublic.model_validate(thread)
 
 
-# @router.delete("/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
-# async def delete_thread(
-#     thread_id: UUID,
-#     user: CurrentUserDep,
-#     checkpointer: CheckpointerDep,
-#     session: SessionDep,
-# ) -> Response:
-#     """Delete one owned conversation and its dependent resources."""
-#     deleted = await thread_repository.delete_thread(session, user.id, thread_id)
-#     if not deleted:
-#         await session.rollback()
-#         raise ApplicationError(404, "thread_not_found", "Conversation not found")
-#     await checkpointer.adelete_thread(checkpoint_thread_id(user.id, thread_id))
-#     await session.commit()
-#     return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_thread(
+    thread_id: UUID,
+    user: CurrentUserDep,
+    checkpointer: CheckpointerDep,
+    session: SessionDep,
+) -> Response:
+    """Delete one owned conversation and its dependent resources."""
+    deleted = await thread_repository.delete_thread(session, user.id, thread_id)
+    if not deleted:
+        await session.rollback()
+        raise ApplicationError(404, "thread_not_found", "Conversation not found")
+    await checkpointer.adelete_thread(checkpoint_thread_id(user.id, thread_id))
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

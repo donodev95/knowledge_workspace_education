@@ -1,36 +1,29 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Knowledge Workspace frontend
 
-## Getting Started
+Next.js frontend with reusable login and registration forms, a shared header and navigation, conversation sidebar and chat composer, and a paper/document dashboard. Zustand manages the session, conversations, messages, papers, and selected paper. Only the session is persisted; logout clears the workspace state. Passwords are never stored.
 
-First, run the development server:
+## Run locally
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
+```sh
+bun install
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000. Run the FastAPI backend on http://localhost:8000. To use another backend, set `NEXT_PUBLIC_API_URL` in `.env.local` to its complete API prefix (for example, `http://localhost:8000/api/v1`). The backend must allow the frontend origin through CORS.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Routes
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `/auth` and `/login`: email/password login.
+- `/register`: username/email/password registration, followed by login.
+- `/`: authenticated conversation workspace; starts with an empty conversation.
+- `/dashboard`: create/select papers and upload documents with document type and assessment metadata.
 
-## Learn More
+The UI uses the existing `/auth`, `/threads`, `/chat`, `/papers`, and `/documents` backend endpoints. It reports backend failures rather than generating placeholder responses. A new conversation is created when its first message is sent. Chat history and paper data are loaded from the server.
 
-To learn more about Next.js, take a look at the following resources:
+## Validation
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```sh
+bun run lint
+bunx tsc --noEmit
+bun run build
+```

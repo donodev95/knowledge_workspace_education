@@ -77,7 +77,7 @@ def create_embedding_provider(
     """Instantiate the configured provider only when needed."""
 
     if settings.embedding_provider == "ollama":
-        if not settings.embedding_model:
+        if not settings.embedding_model or not settings.embedding_dimension or not settings.embedding_base_url:
             raise ValueError(
                 "Ollama embedding model is required"
             )
@@ -87,7 +87,6 @@ def create_embedding_provider(
             dimension=settings.embedding_dimension,
             base_url=(
                 settings.embedding_base_url
-                or "http://host.docker.internal:11434/v1"
             ),
         )
 

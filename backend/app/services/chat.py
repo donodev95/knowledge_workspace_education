@@ -1,6 +1,7 @@
 """Transactional conversation orchestration."""
 
 from collections.abc import AsyncIterator
+from pprint import pprint
 from typing import cast
 from uuid import UUID
 
@@ -10,50 +11,55 @@ from backend.app.agents.checkpoints import AgentCheckpointer
 from backend.app.agents.providers import create_answer_provider
 from backend.app.agents.types import AgentStreamEvent
 from backend.app.agents.workflow import AgentState, run_agent, stream_agent
+from backend.app.core import logging
 from backend.app.core.config import Settings
 from backend.app.ingestion.embeddings import create_embedding_provider
 from backend.app.models.message import Message, MessageRole
 from backend.app.repositories.messages import create_message, list_messages
 
+log = logging.get_logger(__name__)
 
 async def answer_question(
     session: AsyncSession,
     *,
     owner_id: UUID,
     thread_id: UUID,
-    question: str,
+    query: str,
     settings: Settings,
     checkpointer: AgentCheckpointer | None = None,
 ) -> tuple[Message, AgentState]:
-    """Persist a user turn, run the graph, and persist its validated response."""
+    """
+    Persist a user turn, run the graph, and persist its validated response.
+    """
     history = list(await list_messages(session, owner_id, thread_id))
     await create_message(
         session,
         thread_id=thread_id,
         owner_id=owner_id,
         role=MessageRole.USER,
-        content=question,
+        content=query,
     )
     state = await run_agent(
         session=session,
         owner_id=owner_id,
         thread_id=thread_id,
-        query=question,
+        query=query,
         settings=settings,
         embedding_provider=create_embedding_provider(settings),
         answer_provider=create_answer_provider(settings),
         history=history,
         checkpointer=checkpointer,
     )
-    assistant = await create_message(
+    answer = await create_message(
         session,
         thread_id=thread_id,
         owner_id=owner_id,
         role=MessageRole.ASSISTANT,
-        content=state["answer"],
-        sources=state["sources"],
+        content=state.get("answer", ""),
+        sources=state.get("sources", []),
     )
-    return assistant, state
+    
+    return answer, state
 
 
 async def stream_answer_question(
@@ -98,8 +104,8 @@ async def stream_answer_question(
             thread_id=thread_id,
             owner_id=owner_id,
             role=MessageRole.ASSISTANT,
-            content=state["answer"],
-            sources=state["sources"],
+            content=state.get("answer", ""),
+            sources=state.get("sources", []),
         )
         await session.commit()
         yield {
@@ -108,7 +114,7 @@ async def stream_answer_question(
                 "thread_id": str(thread_id),
                 "message_id": str(assistant.id),
                 "answer": assistant.content,
-                "grounded": state["grounded"],
-                "sources": state["sources"],
+                "grounded": state.get("grounded", False),
+                "sources": state.get("sources", []),
             },
         }

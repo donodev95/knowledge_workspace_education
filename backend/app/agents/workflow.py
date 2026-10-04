@@ -50,7 +50,10 @@ def classify_query(query: str) -> Literal["conversation", "knowledge"]:
 
 
 def rewrite_retrieval_query(query: str) -> str:
-    """Remove common conversational framing before the single bounded retry."""
+    """
+    Clean up the query for a second retrieval attempt if the first retrieval fails.
+    Eg: "Could you tell me what hybrid retrieval is?" -> "what hybrid retrieval is"
+    """
     rewritten = re.sub(
         r"^(please\s+)?(can|could|would)\s+you\s+(tell|explain|show)\s+(me\s+)?",
         "",
@@ -102,12 +105,12 @@ def build_agent_workflow(
         return "retrieve" if state.get("needs_retrieval", False) else "generate"
 
     async def retrieve(state: AgentState) -> AgentState:
-        vectors = await embedding_provider.embed_documents([state.get("retrieval_query", "")])
-        validate_embeddings(vectors, 1, settings.embedding_dimension)
+        query_vectors = await embedding_provider.embed_documents([state.get("retrieval_query", "")])
+        validate_embeddings(query_vectors, 1, settings.embedding_dimension)
         search_hits = await search_chunks(
             session,
             owner_id=owner_id,
-            query_vector=vectors[0],
+            query_vector=query_vectors[0],
             top_k=settings.retrieval_top_k,
             score_threshold=settings.retrieval_score_threshold,
             thread_id=thread_id,
@@ -130,10 +133,6 @@ def build_agent_workflow(
     async def grade_context(state: AgentState) -> AgentState:
         return {"grounded": bool(state.get("hits"))}
 
-    def route_context(state: AgentState) -> Literal["rewrite", "generate"]:
-        if not state.get("hits") and state.get("retry_count", 0) < settings.agent_max_retrieval_retries:
-            return "rewrite"
-        return "generate"
 
     async def rewrite(state: AgentState) -> AgentState:
         return {
@@ -141,6 +140,11 @@ def build_agent_workflow(
             "retry_count": state.get("retry_count", 0) + 1,
         }
 
+    def route_context(state: AgentState) -> Literal["rewrite", "generate"]:
+        if not state.get("hits") and state.get("retry_count", 0) < settings.agent_max_retrieval_retries:
+            return "rewrite"
+        return "generate"
+    
     async def generate(state: AgentState) -> AgentState:
         writer = get_stream_writer()
         if state.get("classification", "conversation") == "conversation":
@@ -175,13 +179,22 @@ def build_agent_workflow(
         return {"sources": source_records(hits)}
 
     graph = StateGraph(AgentState)
+    # ==================== Define nodes
+    # Classify the query as RAG or Non-RAG
     graph.add_node("classify", classify)
+    # Determine if retrieval is needed based on classification
     graph.add_node("determine_retrieval", determine_retrieval)
+    # Retrieve the relevant embeddings from the database
     graph.add_node("retrieve", retrieve)
+    # Check if the hits (retrieved embeddings) are sufficient to generate a grounded answer
     graph.add_node("grade_context", grade_context)
+    # Rewrite the query for a second retrieval attempt if the first retrieval fails
     graph.add_node("rewrite", rewrite)
+    # Generate an answer based on the query and the retrieved embeddings
     graph.add_node("generate", generate)
+    # Validate the sources of the generated answer to ensure they are grounded in the retrieved embeddings
     graph.add_node("validate_sources", validate_sources)
+    # ====================  Defines Edges
     graph.add_edge(START, "classify")
     graph.add_edge("classify", "determine_retrieval")
     graph.add_conditional_edges("determine_retrieval", route_retrieval)
