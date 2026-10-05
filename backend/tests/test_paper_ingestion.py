@@ -78,6 +78,8 @@ class SourceIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.label for i in outcomes], ['lo_1','lo_2','lo_3','lo_4','lo_5'])
         self.assertEqual(result.items_created, 6)
         self.assertEqual(self.session.scalar(select(IngestionJob)).owner_id, self.user.id)
+        self.assertEqual(result.source_document.owner_id, self.user.id)
+        self.assertEqual(result.source_document.owner.id, self.user.id)
         self.assertEqual(result.source_document.status, DocumentStatus.EXTRACTED)
         self.assertTrue(all(i.embedding is None for i in items))
         self.assertEqual([i.chunk_index for i in items], list(range(6)))

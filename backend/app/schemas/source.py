@@ -27,6 +27,7 @@ class DocumentUploadInput(BaseModel):
 class SourceDocumentPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    owner_id: UUID | None
     paper_id: UUID
     document_type: DocumentType
     assessment_number: int | None

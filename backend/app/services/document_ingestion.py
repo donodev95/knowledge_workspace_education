@@ -109,6 +109,7 @@ async def ingest_document(
     # Build the document and ingestion job records, and commit them to the database before proceeding with extraction.
     document = SourceDocument(
         id=uuid4(), 
+        owner_id=owner_id,
         paper_id=paper_id, 
         document_type=document_type,
         assessment_number=assessment_number, 

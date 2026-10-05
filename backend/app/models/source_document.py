@@ -9,6 +9,7 @@ from backend.app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from backend.app.models.paper import Paper
+    from backend.app.models.user import User
 
 
 class DocumentType(StrEnum):
@@ -35,13 +36,14 @@ class SourceDocument(TimestampMixin, Base):
         CheckConstraint("replaces_document_id IS NULL OR replaces_document_id != id", name="not_self_replacement"),
     )
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    # NULL is reserved for legacy documents whose paper has no assigned owner.
+    owner_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    owner: Mapped["User | None"] = relationship(back_populates="documents")
     paper_id: Mapped[UUID] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     paper: Mapped["Paper"] = relationship(back_populates="documents")
-    
     document_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType, native_enum=False, create_constraint=True, name="source_document_type", values_callable=lambda e: [v.value for v in e]))
     # Assessment number is the number that appears in the assessment brief and rubric titles, e.g. "Assessment 1" or "Assessment 2". It is only applicable to assessment briefs and rubrics, not component overviews.
     assessment_number: Mapped[int | None] = mapped_column(nullable=True)
-    # 
     replaces_document_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_documents.id", ondelete="SET NULL"), nullable=True)
     original_filename: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(255))
