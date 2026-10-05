@@ -118,9 +118,9 @@ export function ChatWorkspace() {
           if (event === "token" && typeof data === "string") {
             updateAnswer(message => ({ ...message, content: message.content + data }));
           } else if (event === "complete") {
-            const result = data as { message_id: string; answer: string; sources: Message["sources"] };
+            const result = data as { message_id: string; answer: string; sources: Message["sources"]; coverage?: Message["coverage"] };
             updateAnswer(message => ({ ...message, id: result.message_id,
-              content: result.answer, sources: result.sources }));
+              content: result.answer, sources: result.sources, coverage: result.coverage }));
             complete = true;
           } else if (event === "error") {
             throw new Error((data as { message?: string }).message ?? "Unable to complete the response.");
@@ -163,7 +163,7 @@ export function ChatWorkspace() {
             {conversations.find((c) => c.id === activeId)?.title ??
               "New conversation"}
           </span>
-          <span className="status-dot">Source-grounded answers</span>
+          <span className="status-dot">DMV302 · Assessment Brief 1</span>
         </div>
         <div
           className="messages"
@@ -183,6 +183,25 @@ export function ChatWorkspace() {
                     {message.role === "user" ? "You" : "Knowledge"}
                   </span>
                   <p>{message.content}</p>
+                  {message.coverage && <div className="coverage-results">
+                    {message.coverage.outcome_reviews.map(outcome => (
+                      <details key={outcome.learning_outcome.id}>
+                        <summary>{outcome.learning_outcome.label ?? "Learning outcome"} · {outcome.pairs.filter(pair => pair.link).length} links</summary>
+                        <p>{outcome.learning_outcome.content}</p>
+                        {outcome.pairs.filter(pair => pair.link).map(pair => (
+                          <div className="coverage-pair" key={pair.task_requirement.id}>
+                            <strong>{pair.task_requirement.label ?? "Assessment requirement"}</strong>
+                            <p>{pair.task_requirement.content}</p>
+                            <span>{pair.verdict?.replaceAll("_", " ")} · {pair.link?.status}</span>
+                            <p>{pair.rationale}</p>
+                          </div>
+                        ))}
+                        {!outcome.pairs.some(pair => pair.link) && <p>No saved links for this outcome.</p>}
+                        {outcome.pairs.some(pair => pair.error || pair.verdict === "uncertain") && <p>Some pairs need further review.</p>}
+                      </details>
+                    ))}
+                    {message.coverage.warnings.map(warning => <p key={warning}>{warning}</p>)}
+                  </div>}
                   {!!message.sources?.length && (
                     <div className="citations">
                       {message.sources.map((source, i) => (
@@ -201,7 +220,7 @@ export function ChatWorkspace() {
           )}
           {sending && (
             <p className="thinking" role="status">
-              Looking through your documents…
+              Analyzing DMV302 Assessment Brief 1…
             </p>
           )}
           <div ref={bottom} />
@@ -220,7 +239,7 @@ export function ChatWorkspace() {
               id="question"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder="Ask a question about your papers…"
+              placeholder="Run coverage analysis for DMV302 Assessment Brief 1…"
               maxLength={4000}
               rows={2}
               disabled={sending || loading || editingThread}
@@ -246,8 +265,8 @@ export function ChatWorkspace() {
             </div>
           </form>
           <p className="composer-note">
-            Answers are based on your uploaded documents. Always review the
-            sources.
+            Each request analyzes DMV302 against Assessment Brief 1. Review the
+            proposed links.
           </p>
         </div>
       </main>
@@ -352,15 +371,12 @@ export function EmptyConversation({
         to understand?
       </h1>
       <p>
-        Explore your papers, connect ideas, and find
-        <br className="desktop-break" /> answers with the sources to back them
-        up.
+        Check how Assessment Brief 1 covers
+        <br className="desktop-break" /> the DMV302 learning outcomes.
       </p>
       <div className="prompt-grid">
         {[
-          "Summarize the key ideas in my papers",
-          "Help me understand an assessment",
-          "Compare concepts across my documents",
+          "Analyze coverage for DMV302 Assessment Brief 1",
         ].map((text, i) => (
           <button key={text} onClick={() => onPrompt(text)}>
             <span className="prompt-icon">{["▤", "◇", "⇄"][i]}</span>

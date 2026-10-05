@@ -2,10 +2,24 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 export type Conversation = { id: string; title: string };
+export type CoverageResult = {
+  outcome_reviews: {
+    learning_outcome: { id: string; label?: string | null; content: string };
+    pairs: {
+      task_requirement: { id: string; label?: string | null; content: string };
+      verdict?: string | null;
+      rationale?: string | null;
+      error?: string | null;
+      link?: { id: string; status: string } | null;
+    }[];
+  }[];
+  warnings: string[];
+};
 export type Message = {
   id: string;
   role: string;
   content: string;
+  coverage?: CoverageResult | null;
   sources?: { document_name?: string; page_number?: number | null }[];
 };
 export type Paper = { id: string; code: string; title: string };
