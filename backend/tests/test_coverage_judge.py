@@ -4,6 +4,22 @@ from types import SimpleNamespace
 from backend.app.services.coverage_analysis import judgment_error, validate_batch
 from ollama import ResponseError
 import httpx
+from unittest.mock import AsyncMock, patch
+from backend.app.llm.pair_judge import OllamaPairJudge
+
+
+class OllamaUrlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_chat_uses_server_root(self):
+        for url in ('http://localhost:11434', 'http://localhost:11434/v1', 'http://localhost:11434/v1/'):
+            with self.subTest(url=url):
+                settings = SimpleNamespace(llm_provider='ollama', llm_model='test', llm_base_url=url)
+                response = SimpleNamespace(prompt_eval_count=0, eval_count=0,
+                    done_reason='stop', message=SimpleNamespace(content='{"results": []}'))
+                client = SimpleNamespace(chat=AsyncMock(return_value=response))
+                with patch('backend.app.llm.pair_judge.AsyncClient', return_value=client) as factory:
+                    await OllamaPairJudge(settings).judge_batch([], [], set())
+                factory.assert_called_once_with(host='http://localhost:11434', timeout=120)
+                client.chat.assert_awaited_once()
 
 
 class JudgeConfigurationTests(unittest.TestCase):

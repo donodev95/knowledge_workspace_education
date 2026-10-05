@@ -1,215 +1,1042 @@
-"""Load assessment inputs, judge batches, and save proposed coverage links."""
+"""Analyze assessment coverage and create proposed links.
+
+Workflow:
+    1. Load assessment inputs.
+    2. Determine which requirement/outcome relationships need analysis.
+    3. Ask the LLM to classify requirements against learning outcomes.
+    4. Persist positive relationships as proposed links.
+    5. Build a coverage summary.
+"""
+
 import asyncio
-import re
 import time
-from typing import List, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
+
 import httpx
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from backend.app.llm.pair_judge import OllamaPairJudge, PairJudge, judgment_error, explicitly_references
+
+from backend.app.core.errors import ApplicationError
+from backend.app.core.logging import get_logger
+
+from backend.app.llm.pair_judge import (
+    OllamaPairJudge,
+    PairJudge,
+    judgment_error,
+)
+
+from backend.app.models import (
+    SourceItemLink,
+    DocumentType,
+    ItemType,
+    LinkStatus,
+)
+
+from backend.app.repositories.papers import get_a_paper
+from backend.app.repositories.source_documents import (
+    get_document,
+    get_a_document,
+)
 from backend.app.repositories.source_items import get_items
 from backend.app.repositories.source_item_links import get_links
-from backend.app.repositories.papers import get_a_paper
-from backend.app.repositories.source_documents import get_a_document, get_document
-from backend.app.core.logging import get_logger
-from backend.app.core.errors import ApplicationError
-from backend.app.models import SourceItemLink, DocumentType, ItemType, LinkStatus
-from backend.app.schemas.source import SourceItemPublic, SourceItemLinkPublic
-from backend.app.schemas.coverage import PairJudgment, PairReview, CoverageSummary, BatchJudgment, BatchExecution, OutcomeCoverage
+
+from backend.app.schemas.source import (
+    SourceItemPublic,
+    SourceItemLinkPublic,
+)
+from backend.app.schemas.coverage import (
+    PairJudgment,
+    PairReview,
+    CoverageSummary,
+    BatchJudgment,
+    BatchExecution,
+    OutcomeCoverage,
+)
+
 
 logger = get_logger(__name__)
-LINK_TYPE = 'addresses_outcome'
+
+LINK_TYPE = "addresses_outcome"
+
+
+# ============================================================
+# Data used internally by the coverage workflow
+# ============================================================
+
+
+@dataclass
+class CoverageInputs:
+    """All database data required to perform coverage analysis."""
+
+    overview_id: UUID
+    brief_id: UUID
+
+    learning_outcomes: list[SourceItemPublic]
+    requirements: list[SourceItemPublic]
+
+    existing_links: dict[
+        tuple[UUID, UUID],
+        SourceItemLinkPublic,
+    ]
+
+
+@dataclass
+class AnalysisResult:
+    """Result of the LLM analysis phase."""
+
+    judgments: list[PairJudgment]
+    executions: list[BatchExecution]
+    model_call_count: int
+    analyzed_pair_count: int
+
 
 @runtime_checkable
 class ClosableJudge(Protocol):
-    async def close(self) -> None: ...
+    async def close(self) -> None:
+        ...
 
-def task_batches(requirements, batch_size=4):
-    """Group by task preference and cap each model call at batch_size requirements."""
-    groups = {}
-    for requirement in requirements:
-        match = re.match(r'task_(\d+)_requirement_', requirement.label or '', re.I)
-        groups.setdefault(match.group(1) if match else 'unlabelled', []).append(requirement)
-    ordered = [requirement for group in groups.values() for requirement in group]
-    return [ordered[i:i + batch_size] for i in range(0, len(ordered), batch_size)]
 
-def validate_batch(raw, requirements, expected_pairs):
+# ============================================================
+# 1. Load inputs
+# ============================================================
+
+
+async def load_coverage_inputs(
+    session_factory,
+    *,
+    paper_id: UUID,
+    assessment_number: int,
+    owner_id: UUID,
+    overview_document_id: UUID | None = None,
+    assessment_document_id: UUID | None = None,
+) -> CoverageInputs:
+    """Load outcomes, requirements, and existing links."""
+
+    async with session_factory() as session:
+
+        # ----------------------------------------------------
+        # Validate paper ownership
+        # ----------------------------------------------------
+
+        await get_a_paper(
+            session,
+            paper_id,
+            owner_id,
+        )
+
+        # ----------------------------------------------------
+        # Resolve source documents
+        # ----------------------------------------------------
+
+        component_overview = await get_document(
+            session,
+            paper_id=paper_id,
+            owner_id=owner_id,
+            document_type=DocumentType.COMPONENT_OVERVIEW,
+            document_id=overview_document_id,
+            require_extracted=True,
+        )
+
+        assessment_brief = await get_document(
+            session,
+            paper_id=paper_id,
+            owner_id=owner_id,
+            document_type=DocumentType.ASSESSMENT_BRIEF,
+            assessment_number=assessment_number,
+            document_id=assessment_document_id,
+            require_extracted=True,
+        )
+
+        # ----------------------------------------------------
+        # Load learning outcomes
+        # ----------------------------------------------------
+
+        outcome_rows = await get_items(
+            session,
+            component_overview.id,
+            item_type=ItemType.LEARNING_OUTCOME,
+        )
+
+        learning_outcomes = [
+            SourceItemPublic.model_validate(row)
+            for row in outcome_rows
+        ]
+
+        # ----------------------------------------------------
+        # Load assessment requirements
+        # ----------------------------------------------------
+
+        requirement_rows = await get_items(
+            session,
+            assessment_brief.id,
+            item_type=ItemType.ASSESSMENT_REQUIREMENT,
+        )
+
+        requirements = [
+            SourceItemPublic.model_validate(row)
+            for row in requirement_rows
+        ]
+
+        if not learning_outcomes or not requirements:
+            raise ApplicationError(
+                409,
+                "missing_items",
+                (
+                    f"Extracted counts: "
+                    f"{len(learning_outcomes)} learning outcomes, "
+                    f"{len(requirements)} requirements; "
+                    f"both must be nonzero"
+                ),
+            )
+
+        # ----------------------------------------------------
+        # Load existing requirement -> outcome links
+        # ----------------------------------------------------
+
+        link_rows = await get_links(
+            session,
+            from_item_ids=[
+                requirement.id
+                for requirement in requirements
+            ],
+            to_item_ids=[
+                outcome.id
+                for outcome in learning_outcomes
+            ],
+            link_type=LINK_TYPE,
+        )
+
+        links = [
+            SourceItemLinkPublic.model_validate(link)
+            for link in link_rows
+        ]
+
+    existing_links = {
+        (link.from_item_id, link.to_item_id): link
+        for link in links
+    }
+
+    return CoverageInputs(
+        overview_id=component_overview.id,
+        brief_id=assessment_brief.id,
+        learning_outcomes=learning_outcomes,
+        requirements=requirements,
+        existing_links=existing_links,
+    )
+
+
+# ============================================================
+# 2. Decide which relationships need analysis
+# ============================================================
+
+
+def should_analyze_pair(
+    requirement_id: UUID,
+    outcome_id: UUID,
+    existing_links: dict[
+        tuple[UUID, UUID],
+        SourceItemLinkPublic,
+    ],
+    *,
+    refresh_proposals: bool,
+) -> bool:
+    """Return True when this relationship should be sent to the LLM."""
+
+    existing = existing_links.get(
+        (requirement_id, outcome_id)
+    )
+
+    # No previous relationship exists.
+    if existing is None:
+        return True
+
+    # Existing human-reviewed decisions should never be replaced.
+    if existing.status != LinkStatus.PROPOSED:
+        return False
+
+    # Proposed relationships may optionally be re-evaluated.
+    return refresh_proposals
+
+
+def get_eligible_pairs(
+    inputs: CoverageInputs,
+    *,
+    refresh_proposals: bool,
+) -> set[tuple[UUID, UUID]]:
+    """Build IDs for relationships that still require analysis."""
+
+    eligible_pairs: set[tuple[UUID, UUID]] = set()
+
+    for requirement in inputs.requirements:
+        for outcome in inputs.learning_outcomes:
+
+            if should_analyze_pair(
+                requirement.id,
+                outcome.id,
+                inputs.existing_links,
+                refresh_proposals=refresh_proposals,
+            ):
+                eligible_pairs.add(
+                    (requirement.id, outcome.id)
+                )
+
+    return eligible_pairs
+
+
+# ============================================================
+# 3. Batching
+# ============================================================
+
+
+def batched(
+    items: list[SourceItemPublic],
+    batch_size: int,
+):
+    """Yield small batches of requirements."""
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than 0")
+
+    for index in range(0, len(items), batch_size):
+        yield items[index:index + batch_size]
+
+
+# ============================================================
+# 4. Validate LLM structured output
+# ============================================================
+
+
+def validate_batch(
+    raw,
+    requirements: list[SourceItemPublic],
+    eligible_pairs: set[tuple[UUID, UUID]],
+) -> list[PairJudgment]:
+    """Validate and normalize a structured LLM response."""
+
     batch = BatchJudgment.model_validate(raw)
-    ids = [entry.requirement_id for entry in batch.results]
-    if len(ids) != len(set(ids)) or set(ids) != {r.id for r in requirements}:
-        raise ValueError('Batch must contain exactly one result per submitted requirement')
-    judgments = {}
-    for entry in batch.results:
-        if entry.no_match != (not entry.matches):
-            raise ValueError('no_match must be true exactly when matches is empty')
-        for match in entry.matches:
-            key = (entry.requirement_id, match.outcome_id)
-            if key not in expected_pairs or key in judgments or not match.rationale.strip():
-                raise ValueError('Unexpected/duplicate outcome or empty rationale')
-            judgments[key] = PairJudgment(requirement_id=entry.requirement_id, **match.model_dump())
-        for key in expected_pairs:
-            if key[0] == entry.requirement_id and key not in judgments:
-                judgments[key] = PairJudgment(requirement_id=key[0], outcome_id=key[1],
-                    verdict='does_not_address', rationale='No substantive match reported in a complete validated result')
+
+    submitted_requirement_ids = {
+        requirement.id
+        for requirement in requirements
+    }
+
+    returned_requirement_ids = [
+        result.requirement_id
+        for result in batch.results
+    ]
+
+    # Every submitted requirement must appear exactly once.
+    if (
+        len(returned_requirement_ids)
+        != len(set(returned_requirement_ids))
+        or set(returned_requirement_ids)
+        != submitted_requirement_ids
+    ):
+        raise ValueError(
+            "Batch must contain exactly one result "
+            "per submitted requirement"
+        )
+
+    judgments: list[PairJudgment] = []
+
+    for result in batch.results:
+
+        # Ensure output semantics are consistent.
+        if result.no_match != (not result.matches):
+            raise ValueError(
+                "no_match must be true exactly "
+                "when matches is empty"
+            )
+
+        seen_outcomes: set[UUID] = set()
+
+        for match in result.matches:
+
+            pair = (
+                result.requirement_id,
+                match.outcome_id,
+            )
+
+            if pair not in eligible_pairs:
+                raise ValueError(
+                    "Model returned an unexpected "
+                    "requirement/outcome relationship"
+                )
+
+            if match.outcome_id in seen_outcomes:
+                raise ValueError(
+                    "Model returned the same outcome twice "
+                    "for one requirement"
+                )
+
+            if not match.rationale.strip():
+                raise ValueError(
+                    "Matched outcomes require a rationale"
+                )
+
+            seen_outcomes.add(match.outcome_id)
+
+            judgments.append(
+                PairJudgment(
+                    requirement_id=result.requirement_id,
+                    **match.model_dump(),
+                )
+            )
+
     return judgments
 
 
-def insert_for(session, model):
-    return (sqlite_insert if session.get_bind().dialect.name == 'sqlite' else pg_insert)(model)
+# ============================================================
+# 5. LLM analysis
+# ============================================================
+
+
+async def analyze_coverage(
+    *,
+    judge: PairJudge,
+    requirements: list[SourceItemPublic],
+    learning_outcomes: list[SourceItemPublic],
+    eligible_pairs: set[tuple[UUID, UUID]],
+    batch_size: int = 4,
+    time_budget_seconds: int = 600,
+    call_timeout_seconds: int = 120,
+) -> AnalysisResult:
+    """Ask the LLM which requirements address which outcomes."""
+
+    started = time.monotonic()
+    deadline = started + time_budget_seconds
+
+    judgments: list[PairJudgment] = []
+    executions: list[BatchExecution] = []
+
+    model_calls = 0
+
+    # Only send requirements that have at least one
+    # outcome relationship requiring analysis.
+    eligible_requirements = [
+        requirement
+        for requirement in requirements
+        if any(
+            requirement.id == requirement_id
+            for requirement_id, _ in eligible_pairs
+        )
+    ]
+
+    try:
+
+        for batch in batched(
+            eligible_requirements,
+            batch_size,
+        ):
+
+            batch_requirement_ids = {
+                requirement.id
+                for requirement in batch
+            }
+
+            batch_pairs = {
+                pair
+                for pair in eligible_pairs
+                if pair[0] in batch_requirement_ids
+            }
+
+            remaining_time = (
+                deadline - time.monotonic()
+            )
+
+            call_started = time.monotonic()
+
+            status = "completed"
+            error = None
+
+            # ------------------------------------------------
+            # Time budget exhausted
+            # ------------------------------------------------
+
+            if remaining_time <= 0:
+
+                status = "budget_exhausted"
+                error = (
+                    "Analysis time budget exceeded"
+                )
+
+            else:
+
+                model_calls += 1
+
+                try:
+
+                    timeout = min(
+                        call_timeout_seconds,
+                        remaining_time,
+                    )
+
+                    async with asyncio.timeout(timeout):
+
+                        raw = await judge.judge_batch(
+                            batch,
+                            learning_outcomes,
+                            batch_pairs,
+                        )
+
+                    batch_judgments = validate_batch(
+                        raw,
+                        batch,
+                        batch_pairs,
+                    )
+
+                    judgments.extend(batch_judgments)
+
+                except Exception as exc:
+
+                    status = "failed"
+
+                    if isinstance(
+                        exc,
+                        (
+                            TimeoutError,
+                            httpx.TimeoutException,
+                        ),
+                    ):
+                        error = (
+                            f"Model call timed out after "
+                            f"{min(call_timeout_seconds, remaining_time):.0f}s "
+                            f"for {len(batch)} requirements"
+                        )
+
+                    else:
+                        error = judgment_error(exc)
+
+                    logger.warning(
+                        "Coverage batch failed: %s",
+                        error,
+                    )
+
+            executions.append(
+                BatchExecution(
+                    requirement_ids=[
+                        requirement.id
+                        for requirement in batch
+                    ],
+                    status=status,
+                    error=error,
+                    elapsed_seconds=round(
+                        time.monotonic()
+                        - call_started,
+                        3,
+                    ),
+                )
+            )
+
+    finally:
+
+        if isinstance(judge, ClosableJudge):
+            await judge.close()
+
+    return AnalysisResult(
+        judgments=judgments,
+        executions=executions,
+        model_call_count=model_calls,
+        analyzed_pair_count=len(judgments),
+    )
+
+
+# ============================================================
+# 6. Decide which judgments create links
+# ============================================================
+
+
+def should_create_link(
+    judgment: PairJudgment,
+    *,
+    include_partial: bool,
+) -> bool:
+    """Return True when a judgment represents useful coverage."""
+
+    if judgment.verdict == "addresses":
+        return True
+
+    if (
+        include_partial
+        and judgment.verdict == "partially_addresses"
+    ):
+        return True
+
+    return False
+
+
+# ============================================================
+# 7. Persistence
+# ============================================================
+
+
+def insert_for(
+    session: AsyncSession,
+    model,
+):
+    """Use the correct dialect-specific INSERT implementation."""
+
+    if session.get_bind().dialect.name == "sqlite":
+        return sqlite_insert(model)
+
+    return pg_insert(model)
+
 
 async def validate_coverage_access(
     session: AsyncSession,
+    *,
     paper_id: UUID,
     overview_id: UUID,
     brief_id: UUID,
     owner_id: UUID,
 ) -> None:
-    """Require ownership of the paper and both selected source documents."""
-    await get_a_paper(session, paper_id, owner_id)
-    await get_a_document(session, overview_id, owner_id)
-    await get_a_document(session, brief_id, owner_id)
+    """Re-check ownership before writing links."""
 
-async def create_links(session_factory, *, 
-                       paper_id: UUID, 
-                       assessment_number: int, 
-                       owner_id: UUID,
-                       judge: PairJudge, 
-                       overview_document_id=None, 
-                       assessment_document_id=None,
-                       include_partial=True, 
-                       token_budget=16384, 
-                       time_budget_seconds=600,
-                       refresh_proposals=False, 
-                       batch_size=4,
-                       call_timeout_seconds=120) -> CoverageSummary:
-    """Own all sessions; the caller's transaction is never committed or rolled back."""
-    
-    started = time.monotonic()
-    deadline = started + time_budget_seconds
-    run_id = uuid4()
-    # ================= Retrieve relevant items =================
-    # Retrieve the learning_outcome and assessment_requirement items, and any existing links, in a short-lived session. This avoids holding a transaction open for the entire analysis.
+    await get_a_paper(
+        session,
+        paper_id,
+        owner_id,
+    )
+
+    await get_a_document(
+        session,
+        overview_id,
+        owner_id,
+    )
+
+    await get_a_document(
+        session,
+        brief_id,
+        owner_id,
+    )
+
+
+async def save_proposed_links(
+    session_factory,
+    *,
+    paper_id: UUID,
+    owner_id: UUID,
+    overview_id: UUID,
+    brief_id: UUID,
+    judgments: list[PairJudgment],
+    requirements: list[SourceItemPublic],
+    learning_outcomes: list[SourceItemPublic],
+    include_partial: bool,
+) -> list[SourceItemLinkPublic]:
+    """Persist positive judgments as proposed links."""
+
     async with session_factory() as session:
-        # validate accessibility of the paper
-        await get_a_paper(session, paper_id, owner_id)
-        # Get Documents
-        component_overview = await get_document(session, paper_id=paper_id, owner_id=owner_id,
-            document_type=DocumentType.COMPONENT_OVERVIEW, document_id=overview_document_id, require_extracted=True)
-        assessment_brief = await get_document(session, paper_id=paper_id, owner_id=owner_id,
-            document_type=DocumentType.ASSESSMENT_BRIEF, assessment_number=assessment_number,
-            document_id=assessment_document_id, require_extracted=True)
-        overview_id, brief_id = component_overview.id, assessment_brief.id
-        
-        # Get Items
-        learning_outcomes = [SourceItemPublic.model_validate(row) for row in await get_items(
-            session, overview_id, item_type=ItemType.LEARNING_OUTCOME)]
-        task_requirements = [SourceItemPublic.model_validate(row) for row in await get_items(
-            session, brief_id, item_type=ItemType.ASSESSMENT_REQUIREMENT)]
-        
-        if not learning_outcomes or not task_requirements:
-            raise ApplicationError(409, 'missing_items', f'Extracted counts: {len(learning_outcomes)} learning outcomes, {len(task_requirements)} requirements; both must be nonzero')
-        
-        # Fetch existing links between the requirements and outcomes
-        links = [SourceItemLinkPublic.model_validate(link) for link in await get_links(
-            session,
-            from_item_ids=[r.id for r in task_requirements],
-            to_item_ids=[o.id for o in learning_outcomes],
-            link_type=LINK_TYPE,
-        )]
 
-    existing_links = {(link.from_item_id,link.to_item_id):link for link in links}
-    # Create all possible pairs of task requirements and learning outcomes
-    review_objects = [PairReview(task_requirement=r,learning_outcome=o,explicit_reference=explicitly_references(r,o)) for r in task_requirements for o in learning_outcomes]
-    # Index the pairs by (requirement_id, outcome_id) for quick lookup
-    indexed_review_objects = {(p.task_requirement.id,p.learning_outcome.id):p for p in review_objects}
-    # Filter the processed pairs in existing_links from the legitimate pairs
-    eligible_ids = set()
-    for key,pair in indexed_review_objects.items():
-        old = existing_links.get(key)
-        pair.link = old
-        if old and (old.status != LinkStatus.PROPOSED or not refresh_proposals):
-            pair.skipped = True
-        else:
-            eligible_ids.add(key)
-    
+        # Re-check access immediately before writing.
+        await validate_coverage_access(
+            session,
+            paper_id=paper_id,
+            overview_id=overview_id,
+            brief_id=brief_id,
+            owner_id=owner_id,
+        )
+
+        for judgment in judgments:
+
+            if not should_create_link(
+                judgment,
+                include_partial=include_partial,
+            ):
+                continue
+
+            statement = (
+                insert_for(
+                    session,
+                    SourceItemLink,
+                )
+                .values(
+                    id=uuid4(),
+                    from_item_id=judgment.requirement_id,
+                    to_item_id=judgment.outcome_id,
+                    link_type=LINK_TYPE,
+                    status=LinkStatus.PROPOSED,
+                    rationale=(
+                        f"[{judgment.verdict}] "
+                        f"{judgment.rationale}"
+                    ),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "from_item_id",
+                        "to_item_id",
+                        "link_type",
+                    ]
+                )
+            )
+
+            await session.execute(statement)
+
+        await session.commit()
+
+        # Return current links after persistence.
+        link_rows = await get_links(
+            session,
+            from_item_ids=[
+                requirement.id
+                for requirement in requirements
+            ],
+            to_item_ids=[
+                outcome.id
+                for outcome in learning_outcomes
+            ],
+            link_type=LINK_TYPE,
+        )
+
+        return [
+            SourceItemLinkPublic.model_validate(link)
+            for link in link_rows
+        ]
+
+
+# ============================================================
+# 8. Build review objects for API/reporting
+# ============================================================
+
+
+def build_pair_reviews(
+    inputs: CoverageInputs,
+    judgments: list[PairJudgment],
+    links: list[SourceItemLinkPublic],
+    eligible_pairs: set[tuple[UUID, UUID]],
+) -> list[PairReview]:
+    """Create PairReview objects only after analysis is complete."""
+
+    judgments_by_pair = {
+        (
+            judgment.requirement_id,
+            judgment.outcome_id,
+        ): judgment
+        for judgment in judgments
+    }
+
+    links_by_pair = {
+        (
+            link.from_item_id,
+            link.to_item_id,
+        ): link
+        for link in links
+    }
+
+    reviews: list[PairReview] = []
+
+    for requirement in inputs.requirements:
+
+        for outcome in inputs.learning_outcomes:
+
+            key = (
+                requirement.id,
+                outcome.id,
+            )
+
+            judgment = judgments_by_pair.get(key)
+            link = links_by_pair.get(key)
+
+            review = PairReview(
+                task_requirement=requirement,
+                learning_outcome=outcome,
+                link=link,
+            )
+
+            if judgment:
+                review.verdict = judgment.verdict
+                review.rationale = judgment.rationale
+
+            elif key not in eligible_pairs:
+                # Pair already had an existing decision/link.
+                review.skipped = True
+
+            reviews.append(review)
+
+    return reviews
+
+
+# ============================================================
+# 9. Summary
+# ============================================================
+
+
+def build_coverage_summary(
+    *,
+    run_id: UUID,
+    started: float,
+    paper_id: UUID,
+    assessment_number: int,
+    inputs: CoverageInputs,
+    analysis: AnalysisResult,
+    links: list[SourceItemLinkPublic],
+    pairs: list[PairReview],
+    include_partial: bool,
+) -> CoverageSummary:
+    """Build the API-facing coverage report."""
+
+    pending_outcome_ids = {
+        link.to_item_id
+        for link in links
+        if link.status == LinkStatus.PROPOSED
+    }
+
+    confirmed_outcome_ids = {
+        link.to_item_id
+        for link in links
+        if link.status == LinkStatus.CONFIRMED
+    }
+
+    unresolved_pairs = [
+        pair
+        for pair in pairs
+        if pair.error
+        or pair.verdict == "uncertain"
+    ]
+
+    suggested_outcome_ids = {
+        pair.learning_outcome.id
+        for pair in pairs
+        if (
+            pair.verdict == "addresses"
+            or (
+                include_partial
+                and pair.verdict
+                == "partially_addresses"
+            )
+        )
+    }
+
+    unknown_outcome_ids = {
+        pair.learning_outcome.id
+        for pair in unresolved_pairs
+    }
+
+    return CoverageSummary(
+        run_id=run_id,
+        batches=analysis.executions,
+
+        paper_id=paper_id,
+        assessment_number=assessment_number,
+
+        overview_document_id=inputs.overview_id,
+        assessment_document_id=inputs.brief_id,
+
+        outcome_count=len(
+            inputs.learning_outcomes
+        ),
+
+        requirement_count=len(
+            inputs.requirements
+        ),
+
+        pair_count=len(pairs),
+
+        pairs=pairs,
+
+        proposed_links=[
+            pair
+            for pair in pairs
+            if (
+                pair.link
+                and pair.link.status
+                == LinkStatus.PROPOSED
+            )
+        ],
+
+        outcomes_with_no_suggested_match=[
+            outcome
+            for outcome in inputs.learning_outcomes
+            if outcome.id
+            not in (
+                suggested_outcome_ids
+                | pending_outcome_ids
+                | confirmed_outcome_ids
+                | unknown_outcome_ids
+            )
+        ],
+
+        outcomes_awaiting_review=[
+            outcome
+            for outcome in inputs.learning_outcomes
+            if outcome.id in pending_outcome_ids
+        ],
+
+        pairs_needing_review=unresolved_pairs,
+
+        confirmed_outcome_count=len(
+            confirmed_outcome_ids
+        ),
+
+        confirmed_coverage=(
+            len(confirmed_outcome_ids)
+            / len(inputs.learning_outcomes)
+        ),
+
+        analyzed_pair_count=(
+            analysis.analyzed_pair_count
+        ),
+
+        skipped_pair_count=sum(
+            pair.skipped
+            for pair in pairs
+        ),
+
+        model_call_count=(
+            analysis.model_call_count
+        ),
+
+        elapsed_seconds=round(
+            time.monotonic() - started,
+            2,
+        ),
+
+        outcome_reviews=[
+            OutcomeCoverage(
+                learning_outcome=outcome,
+                pairs=[
+                    pair
+                    for pair in pairs
+                    if (
+                        pair.learning_outcome.id
+                        == outcome.id
+                    )
+                ],
+            )
+            for outcome in inputs.learning_outcomes
+        ],
+
+        warnings=[
+            (
+                "Counts reflect extracted items only; "
+                "analysis cannot repair missing extraction."
+            ),
+            (
+                "Existing proposals and human "
+                "decisions are preserved."
+            ),
+            (
+                "Confirmed coverage counts only "
+                "reviewed links, not proposals."
+            ),
+        ],
+    )
+
+
+# ============================================================
+# 10. Main orchestration
+# ============================================================
+
+
+async def create_links(
+    session_factory,
+    *,
+    paper_id: UUID,
+    assessment_number: int,
+    owner_id: UUID,
+    judge: PairJudge,
+    overview_document_id: UUID | None = None,
+    assessment_document_id: UUID | None = None,
+    include_partial: bool = True,
+    token_budget: int = 16384,
+    time_budget_seconds: int = 600,
+    refresh_proposals: bool = False,
+    batch_size: int = 4,
+    call_timeout_seconds: int = 120,
+) -> CoverageSummary:
+    """Analyze requirement/outcome coverage and create proposed links."""
+
+    started = time.monotonic()
+    run_id = uuid4()
+
+    # ========================================================
+    # 1. LOAD
+    # ========================================================
+
+    inputs = await load_coverage_inputs(
+        session_factory,
+        paper_id=paper_id,
+        assessment_number=assessment_number,
+        owner_id=owner_id,
+        overview_document_id=overview_document_id,
+        assessment_document_id=assessment_document_id,
+    )
+
+    logger.info(
+        "Assessment %s: %d requirements, %d learning outcomes",
+        assessment_number,
+        len(inputs.requirements),
+        len(inputs.learning_outcomes),
+    )
+
+    # ========================================================
+    # 2. FILTER
+    # ========================================================
+
+    eligible_pairs = get_eligible_pairs(
+        inputs,
+        refresh_proposals=refresh_proposals,
+    )
+
+    # ========================================================
+    # 3. ANALYZE
+    # ========================================================
+
     if isinstance(judge, OllamaPairJudge):
         judge.token_budget = token_budget
-    executions, model_calls, completed = [], 0, 0
-    logger.info('Assessment %s: %d task_requirements, %d learning_outcomes', assessment_number,
-                len(task_requirements), len(learning_outcomes))
-    work = [r for r in task_requirements if any(key[0] == r.id for key in eligible_ids)]
-    try:
-        for batch in task_batches(work, batch_size):
-            keys = {key for key in eligible_ids if key[0] in {r.id for r in batch}}
-            remaining_time = deadline - time.monotonic()
-            call_started = time.monotonic()
-            error, status = None, 'completed'
-            if remaining_time <= 0:
-                status, error = 'budget_exhausted', 'Analysis time budget exceeded'
-            else:
-                model_calls += 1
-                try:
-                    async with asyncio.timeout(min(call_timeout_seconds, remaining_time)):
-                        raw = await judge.judge_batch(batch, learning_outcomes, keys)
-                    judgments = validate_batch(raw, batch, keys)
-                    for key, judgment in judgments.items():
-                        indexed_review_objects[key].verdict = judgment.verdict
-                        indexed_review_objects[key].rationale = judgment.rationale
-                    completed += len(judgments)
-                except Exception as exc:
-                    status = 'failed'
-                    error = (f'Model call timed out after {min(call_timeout_seconds, remaining_time):.0f}s for {len(batch)} requirements; increase call/time budgets or reduce batch_size'
-                             if isinstance(exc, (TimeoutError, httpx.TimeoutException)) else judgment_error(exc))
-                    logger.warning('Coverage batch failed: %s', error)
-            if error:
-                for key in keys:
-                    indexed_review_objects[key].error = error
-            executions.append(BatchExecution(
-                requirement_ids=[r.id for r in batch],
-                status=status, error=error, elapsed_seconds=round(time.monotonic()-call_started, 3)))
-    finally:
-        if isinstance(judge, ClosableJudge):
-            await judge.close()
 
-    # Short write phase. Refreshes never erase or overwrite prior rationale/history.
-    async with session_factory() as session:
-        await validate_coverage_access(session, paper_id, overview_id, brief_id, owner_id)
-        for pair in review_objects:
-            if pair.verdict=='addresses' or (include_partial and pair.verdict=='partially_addresses'):
-                statement=insert_for(session,SourceItemLink).values(id=uuid4(),from_item_id=pair.task_requirement.id,
-                    to_item_id=pair.learning_outcome.id,link_type=LINK_TYPE,status=LinkStatus.PROPOSED,
-                    rationale=f'[{pair.verdict}] {pair.rationale}')
-                await session.execute(statement.on_conflict_do_nothing(index_elements=['from_item_id','to_item_id','link_type']))
-        await session.commit()
-        links=[SourceItemLinkPublic.model_validate(link) for link in await get_links(
-            session,
-            from_item_ids=[r.id for r in task_requirements],
-            to_item_ids=[o.id for o in learning_outcomes],
-            link_type=LINK_TYPE,
-        )]
-    pairs = review_objects
-    by_pair={(link.from_item_id,link.to_item_id):link for link in links}
-    for key,pair in indexed_review_objects.items(): pair.link=by_pair.get(key)
-    pending={link.to_item_id for link in links if link.status==LinkStatus.PROPOSED}
-    confirmed={link.to_item_id for link in links if link.status==LinkStatus.CONFIRMED}
-    unresolved=[p for p in pairs if p.error or p.verdict=='uncertain']
-    unknown={p.learning_outcome.id for p in unresolved} | {p.learning_outcome.id for p in pairs if p.skipped and not p.link}
-    suggested={p.learning_outcome.id for p in pairs if p.verdict=='addresses' or (include_partial and p.verdict=='partially_addresses')}
-    return CoverageSummary(run_id=run_id,batches=executions,paper_id=paper_id,assessment_number=assessment_number,
-        overview_document_id=overview_id,assessment_document_id=brief_id,outcome_count=len(learning_outcomes),
-        requirement_count=len(task_requirements),pair_count=len(pairs),pairs=pairs,
-        proposed_links=[p for p in pairs if p.link and p.link.status==LinkStatus.PROPOSED],
-        outcomes_with_no_suggested_match=[o for o in learning_outcomes if o.id not in suggested|pending|confirmed|unknown],
-        outcomes_awaiting_review=[o for o in learning_outcomes if o.id in pending],pairs_needing_review=unresolved,
-        confirmed_outcome_count=len(confirmed),confirmed_coverage=len(confirmed)/len(learning_outcomes),
-        analyzed_pair_count=completed,skipped_pair_count=sum(p.skipped for p in pairs),
-        model_call_count=model_calls,elapsed_seconds=round(time.monotonic()-started,2),
-        outcome_reviews=[OutcomeCoverage(learning_outcome=o, pairs=[p for p in pairs if p.learning_outcome.id == o.id]) for o in learning_outcomes],
-        warnings=[
-            'Counts reflect extracted items only; analysis cannot repair missing extraction.',
-            'Existing proposals and human decisions are preserved.',
-            'Confirmed coverage counts only reviewed links, not proposals.',
-        ])
+    analysis = await analyze_coverage(
+        judge=judge,
+        requirements=inputs.requirements,
+        learning_outcomes=inputs.learning_outcomes,
+        eligible_pairs=eligible_pairs,
+        batch_size=batch_size,
+        time_budget_seconds=time_budget_seconds,
+        call_timeout_seconds=call_timeout_seconds,
+    )
+
+    # ========================================================
+    # 4. SAVE
+    # ========================================================
+
+    links = await save_proposed_links(
+        session_factory,
+        paper_id=paper_id,
+        owner_id=owner_id,
+        overview_id=inputs.overview_id,
+        brief_id=inputs.brief_id,
+        judgments=analysis.judgments,
+        requirements=inputs.requirements,
+        learning_outcomes=inputs.learning_outcomes,
+        include_partial=include_partial,
+    )
+
+    # ========================================================
+    # 5. BUILD REVIEW DATA
+    # ========================================================
+
+    pairs = build_pair_reviews(
+        inputs,
+        analysis.judgments,
+        links,
+        eligible_pairs,
+    )
+
+    # ========================================================
+    # 6. SUMMARIZE
+    # ========================================================
+
+    return build_coverage_summary(
+        run_id=run_id,
+        started=started,
+        paper_id=paper_id,
+        assessment_number=assessment_number,
+        inputs=inputs,
+        analysis=analysis,
+        links=links,
+        pairs=pairs,
+        include_partial=include_partial,
+    )

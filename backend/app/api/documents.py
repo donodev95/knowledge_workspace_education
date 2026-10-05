@@ -11,7 +11,7 @@ from backend.app.repositories.source_documents import get_a_document
 from backend.app.core.errors import ApplicationError
 from backend.app.db.session import SessionDep
 from backend.app.ingestion.converter import PaperValidationError
-from backend.app.models import DocumentType, SourceDocument
+from backend.app.models import DocumentType, Paper, SourceDocument
 from backend.app.schemas.source import DocumentUploadInput, SourceDocumentPublic, SourceUploadResponse, SourceItemPublic
 from backend.app.services.document_ingestion import ingest_document, embed_source_document, IngestionUnavailableError
 
@@ -65,9 +65,13 @@ async def upload_document(
 
 
 @router.get('', response_model=list[SourceDocumentPublic])
-async def list_documents(paper_id: UUID, session: SessionDep, user: CurrentUserDep):
-    await get_a_paper(session, paper_id, user.id)
-    return (await session.execute(select(SourceDocument).where(SourceDocument.paper_id == paper_id).order_by(SourceDocument.created_at))).scalars().all()
+async def list_documents(session: SessionDep, user: CurrentUserDep, paper_id: UUID | None = None):
+    """List the user's documents, optionally restricted to one owned paper."""
+    query = select(SourceDocument).join(Paper).where(Paper.owner_id == user.id)
+    if paper_id is not None:
+        await get_a_paper(session, paper_id, user.id)
+        query = query.where(SourceDocument.paper_id == paper_id)
+    return (await session.execute(query.order_by(SourceDocument.created_at, SourceDocument.id))).scalars().all()
 
 
 @router.get('/{document_id}/items', response_model=list[SourceItemPublic])

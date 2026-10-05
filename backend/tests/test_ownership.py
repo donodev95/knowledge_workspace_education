@@ -59,7 +59,7 @@ class OwnershipTests(unittest.TestCase):
     def test_missing_token_all_actions(self):
         for method, path in [('get','/api/v1/docs'), ('get','/api/v1/redoc'), ('get','/api/v1/openapi.json'), ('get','/'), ('get','/api/v1/papers'), ('post','/api/v1/papers'),
               ('get',f'/api/v1/papers/{self.paper.id}'), ('post','/api/v1/documents/upload'),
-              ('get',f'/api/v1/documents?paper_id={self.paper.id}'),
+              ('get','/api/v1/documents'), ('get',f'/api/v1/documents?paper_id={self.paper.id}'),
               ('get',f'/api/v1/documents/{self.doc.id}/items'), ('post',f'/api/v1/documents/{self.doc.id}/embed'),
               ('delete',f'/api/v1/documents/{self.doc.id}'), ('post','/api/v1/source-item-links'),
               ('patch',f'/api/v1/source-item-links/{self.link.id}')]:
@@ -99,3 +99,49 @@ class OwnershipTests(unittest.TestCase):
         self.assertEqual(response.status_code,201)
         self.assertEqual(response.json()['owner_id'],str(self.users[1].id))
         self.assertEqual(self.client.post('/api/v1/papers',headers=self.headers(1),json={'code':'DMV302','title':'Duplicate'}).status_code,409)
+
+    def test_list_all_documents_and_optional_paper_filter(self):
+        papers = [Paper(owner_id=user.id, code=f'EXTRA{i}', title='Another paper')
+                  for i, user in enumerate(self.users)]
+        self.session.add_all(papers)
+        self.session.flush()
+        documents = [SourceDocument(
+            paper_id=paper.id, owner_id=paper.owner_id,
+            document_type=DocumentType.COMPONENT_OVERVIEW,
+            original_filename='extra.pdf', display_name='Extra',
+            mime_type='application/pdf', file_size=1, content_hash='c'*64,
+            status=DocumentStatus.EXTRACTED,
+        ) for paper in papers]
+        self.session.add_all(documents)
+        self.session.commit()
+
+        response = self.client.get('/api/v1/documents', headers=self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({doc['id'] for doc in response.json()},
+                         {str(self.doc.id), str(documents[0].id)})
+        response = self.client.get(f'/api/v1/documents?paper_id={self.paper.id}', headers=self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([doc['id'] for doc in response.json()], [str(self.doc.id)])
+        response = self.client.get('/api/v1/documents', headers=self.headers(1))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([doc['id'] for doc in response.json()], [str(documents[1].id)])
+
+    def test_list_documents_empty_and_invalid_filter(self):
+        response = self.client.get('/api/v1/documents', headers=self.headers(1))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+        self.assertEqual(self.client.get('/api/v1/documents?paper_id=invalid', headers=self.headers()).status_code, 422)
+        self.assertEqual(self.client.get(f'/api/v1/documents?paper_id={uuid4()}', headers=self.headers()).status_code, 404)
+
+    def test_rename_thread_owner_and_validation(self):
+        response = self.client.post('/api/v1/threads', headers=self.headers(), json={'title': 'Original'})
+        self.assertEqual(response.status_code, 201)
+        path = '/api/v1/threads/' + response.json()['id']
+        response = self.client.patch(path, headers=self.headers(), json={'title': ' Renamed '})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['title'], 'Renamed')
+        self.assertEqual(self.client.get(path, headers=self.headers()).json()['title'], 'Renamed')
+        self.assertEqual(self.client.patch(path, headers=self.headers(1), json={'title': 'Foreign'}).status_code, 404)
+        self.assertEqual(self.client.patch(path, headers=self.headers(), json={'title': '   '}).status_code, 422)
+        self.assertEqual(self.client.patch(path, headers=self.headers(), json={'title': 'x'*201}).status_code, 422)
+        self.assertEqual(self.client.patch(path, json={'title': 'Unauthorized'}).status_code, 401)

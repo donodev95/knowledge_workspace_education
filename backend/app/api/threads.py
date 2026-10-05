@@ -12,7 +12,7 @@ from backend.app.auth.dependencies import CurrentUserDep
 from backend.app.core.errors import ApplicationError
 from backend.app.db.session import SessionDep
 from backend.app.repositories import threads as thread_repository
-from backend.app.schemas.thread import ThreadCreate, ThreadPublic
+from backend.app.schemas.thread import ThreadCreate, ThreadPublic, ThreadUpdate
 
 router = APIRouter(prefix="/threads", tags=["threads"])
 
@@ -57,3 +57,16 @@ async def delete_thread(
     await checkpointer.adelete_thread(checkpoint_thread_id(user.id, thread_id))
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/{thread_id}", response_model=ThreadPublic)
+async def update_thread(
+    thread_id: UUID, payload: ThreadUpdate, user: CurrentUserDep, session: SessionDep
+) -> ThreadPublic:
+    thread = await thread_repository.get_thread(session, user.id, thread_id)
+    if thread is None:
+        raise ApplicationError(404, "thread_not_found", "Conversation not found")
+    thread.title = payload.title
+    await session.commit()
+    await session.refresh(thread)
+    return ThreadPublic.model_validate(thread)
