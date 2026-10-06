@@ -157,11 +157,11 @@ class SourceIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.session.rollback()
 
     async def test_rubric_table_row_extraction(self):
-        from backend.app.ingestion.source_items import extract_source_items
+        from backend.app.ingestion.source_items import convert_to_source_items
         from uuid import uuid4
         cell = lambda row, text, header=False: SimpleNamespace(start_row_offset_idx=row, start_col_offset_idx=0, text=text, column_header=header)
         table = SimpleNamespace(self_ref='#/tables/0', label='table', prov=[], data=SimpleNamespace(table_cells=[cell(0,'Criterion',True),cell(1,'Reasoning'),cell(2,'Evidence')]))
         doc = SimpleNamespace(iterate_items=lambda: iter([(table,0)]))
-        items = extract_source_items(doc, [], None, SimpleNamespace(encode=lambda s:s.split()), uuid4(), DocumentType.RUBRIC)
+        items = convert_to_source_items(doc, [], None, SimpleNamespace(encode=lambda s:s.split()), uuid4(), DocumentType.RUBRIC)
         self.assertEqual([i.content for i in items], ['Reasoning','Evidence'])
         self.assertEqual([i.label for i in items], ['criterion_1','criterion_2'])

@@ -1,6 +1,6 @@
 """Serializable agent evidence and stream event types."""
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, NotRequired
 
 INSUFFICIENT_EVIDENCE = (
     "I could not find enough evidence in your indexed knowledge base to answer that. "
@@ -18,6 +18,7 @@ class Evidence(TypedDict):
     chunk_index: int
     score: float
     content: str
+    label: NotRequired[str | None]
 
 
 class AgentStreamEvent(TypedDict):

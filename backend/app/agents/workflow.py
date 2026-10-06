@@ -69,6 +69,7 @@ def source_records(hits: list[Evidence]) -> list[dict[str, Any]]:
             "chunk_index": hit["chunk_index"],
             "score": round(hit["score"], 4),
             "excerpt": hit["content"][:600],
+            "label": hit.get("label"),
         }
         for hit in hits
     ]
@@ -113,6 +114,7 @@ def build_agent_workflow(
                 "chunk_index": hit.chunk.chunk_index,
                 "score": hit.score,
                 "content": hit.chunk.content,
+                "label": hit.chunk.label,
             }
             for hit in search_hits
         ]

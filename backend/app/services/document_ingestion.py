@@ -1,4 +1,5 @@
 """Source extraction is committed before optional embedding begins."""
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
@@ -16,12 +17,34 @@ from backend.app.repositories.papers import get_a_paper
 from backend.app.repositories.source_documents import get_a_document
 from backend.app.ingestion.converter import validate_upload, convert_document
 from backend.app.ingestion.embeddings import EmbeddingProvider, create_embedding_provider, validate_embeddings
-from backend.app.ingestion.source_items import extract_source_items
+from backend.app.ingestion.source_items import convert_to_source_items
+from backend.app.ingestion.decision_model import DecisionClassifier, DecisionResult
 from backend.app.models import Paper, SourceDocument, SourceItem, DocumentType, DocumentStatus, IngestionJob, IngestionJobStatus
 from backend.app.models.source_item import EMBEDDING_DIMENSION
 
 logger = logging.getLogger(__name__)
 OUTPUT_DIR = Path(__file__).resolve().parents[3] / 'output'
+
+
+def save_ingestion_artifacts(document_id: UUID, docling_document, chunks, items) -> Path:
+    """Export extraction snapshots into output/<document UUID>/ as JSON."""
+    output = OUTPUT_DIR / str(document_id)
+    output.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        'docling_document.json': docling_document.model_dump(mode='json', by_alias=True),
+        'docling_chunks.json': [chunk.model_dump(mode='json', by_alias=True) for chunk in chunks],
+        'source_items.json': [
+            {column.name: getattr(item, column.name)
+             for column in SourceItem.__table__.columns
+             if column.name not in {'embedding', 'created_at', 'updated_at'}}
+            for item in items
+        ],
+    }
+    for filename, payload in artifacts.items():
+        temporary = output / f'{filename}.tmp'
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        temporary.replace(output / filename)
+    return output
 
 
 @dataclass(frozen=True)
@@ -33,7 +56,6 @@ class IngestionResult:
 
 class IngestionUnavailableError(ValueError):
     pass
-
 
 async def embed_source_document(session: AsyncSession, document_id: UUID, settings: Settings,
                                 provider: EmbeddingProvider | None = None, *, owner_id: UUID) -> str | None:
@@ -73,7 +95,6 @@ async def embed_source_document(session: AsyncSession, document_id: UUID, settin
             job.error_message = 'Embedding failed; extracted items retained for retry'
         await session.commit()
         return 'Embedding failed; extracted items retained for retry'
-
 
 async def ingest_document(
     session: AsyncSession, *, 
@@ -134,16 +155,24 @@ async def ingest_document(
         docling_document = convert_document(extension, filename, data, settings.enable_ocr)
         encoding = tiktoken.encoding_for_model('gpt-4o')
         chunker = HybridChunker(tokenizer=OpenAITokenizer(tokenizer=encoding, max_tokens=512))
-        items = extract_source_items(docling_document, list(chunker.chunk(dl_doc=docling_document)), chunker, encoding, document_id, document_type)
-        # Parents precede children; flush context before adding dependent items.
-        session.add_all([item for item in items if item.parent_item_id is None])
-        await session.flush()
-        session.add_all([item for item in items if item.parent_item_id is not None])
+        chunks = list(chunker.chunk(dl_doc=docling_document))
+        chunk_labels: list[DecisionResult] = []
+        async with DecisionClassifier(settings) as classifier:
+            # label each contextualized chunk (content and the section header).
+            for chunk in chunks:
+                chunk_labels.append(await classifier.classify(chunker.contextualize(chunk), document_type))
         
+        items = convert_to_source_items(docling_document, chunks, chunker, encoding,
+            document_id, document_type, classifications=chunk_labels)
+        for item in items:
+            item.metadata_json = {**item.metadata_json, 'decision_model': settings.decision_model}
+        output = await asyncio.to_thread(save_ingestion_artifacts, document_id, docling_document, chunks, items)
+        session.add_all(items)
+
         document.status = DocumentStatus.EXTRACTED
         document.metadata_json = {**document.metadata_json, 'page_count': len(docling_document.pages)}
         
-        job.details_json = {'items': len(items), 'embedding_requested': embed}
+        job.details_json = {'items': len(items), 'embedding_requested': embed, 'output_directory': str(output)}
         job.status = IngestionJobStatus.COMPLETED
         await session.commit()
     except Exception as exc:
@@ -157,17 +186,6 @@ async def ingest_document(
             job.error_message = 'Source extraction failed'
         await session.commit()
         raise IngestionUnavailableError('Source extraction failed') from exc
-    # Artifacts are diagnostic; their failure must not undo durable extraction.
-    try:
-        artifact_dir = OUTPUT_DIR / str(document_id)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / 'docling_document.json').write_text(json.dumps(docling_document.export_to_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
-        (artifact_dir / 'source_items.json').write_text(json.dumps([
-            {'id': str(item.id), 'item_type': item.item_type.value, 'label': item.label,
-             'content': item.content, 'chunk_index': item.chunk_index, 'metadata': item.metadata_json}
-            for item in items], ensure_ascii=False, indent=2), encoding='utf-8')
-    except OSError:
-        logger.exception('Could not save diagnostic artifacts')
     count = len(items)
     error = await embed_source_document(session, document_id, settings, embedding_provider, owner_id=owner_id) if embed else None
     document = await session.get(SourceDocument, document_id)

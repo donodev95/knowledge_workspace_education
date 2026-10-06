@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_api_key: SecretStr | None = None
     llm_base_url: str = ""
+    decision_model_provider: Literal["ollama"] = "ollama"
+    decision_model: str = Field(default="tev1:0.8b", min_length=1)
+    decision_api_key: SecretStr | None = None
+    decision_base_url: str = "http://localhost:11434/v1/systemone"
+    decision_timeout_seconds: int = Field(default=120, ge=1, le=600)
+    decision_keep_alive: str = "10m"
+
     embedding_provider: str = "ollama"
     embedding_model: str = ""
     embedding_api_key: SecretStr | None = None

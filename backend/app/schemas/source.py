@@ -53,7 +53,6 @@ class SourceItemPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     source_document_id: UUID
-    parent_item_id: UUID | None
     item_type: ItemType
     label: str | None
     chunk_index: int

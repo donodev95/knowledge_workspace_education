@@ -8,7 +8,7 @@ from backend.app.repositories.source_documents import get_a_document
 from backend.app.repositories.papers import get_a_paper
 from backend.app.db.session import SessionDep, DatabaseDep
 from backend.app.core.errors import ApplicationError
-from backend.app.models import SourceItem, SourceItemLink, SourceDocument, ItemType, LinkStatus
+from backend.app.models import SourceItem, SourceItemLink, SourceDocument, ItemType, LinkStatus, DocumentType
 from backend.app.schemas.source import SourceItemPublic, SourceItemLinkPublic, SourceItemLinkUpdate
 from backend.app.schemas.coverage import CoverageRequest, CoverageAnalysisResponse, ProposedLinksSummary, OutcomeProposals, ProposedRequirement
 from backend.app.llm import pair_judge
@@ -59,8 +59,8 @@ async def list_proposed_links(
         .join(overview, outcome.source_document_id == overview.id)
         .where(
             brief.paper_id == paper_id, overview.paper_id == paper_id,
-            requirement.item_type == ItemType.ASSESSMENT_REQUIREMENT,
-            outcome.item_type == ItemType.LEARNING_OUTCOME,
+            requirement.item_type.in_([ItemType.ASSESSMENT_REQUIREMENT, ItemType.CONTEXT]),
+            outcome.item_type.in_([ItemType.LEARNING_OUTCOME, ItemType.CONTEXT]),
             SourceItemLink.status == LinkStatus.PROPOSED,
             SourceItemLink.link_type == coverage_analysis.LINK_TYPE,
         ).order_by(overview.id, outcome.chunk_index, brief.assessment_number, brief.id, requirement.chunk_index))
@@ -98,10 +98,12 @@ async def review_link(link_id: UUID, payload: SourceItemLinkUpdate, session: Ses
     requirement = await get_an_item(session, link.from_item_id, user.id)
     outcome = await get_an_item(session, link.to_item_id, user.id)
     if (link.link_type != coverage_analysis.LINK_TYPE or
-            requirement.item_type != ItemType.ASSESSMENT_REQUIREMENT or outcome.item_type != ItemType.LEARNING_OUTCOME):
+            requirement.item_type not in (ItemType.ASSESSMENT_REQUIREMENT, ItemType.CONTEXT) or outcome.item_type not in (ItemType.LEARNING_OUTCOME, ItemType.CONTEXT)):
         raise ApplicationError(422, 'invalid_coverage_link', 'Expected an assessment requirement → learning outcome link')
     brief = await get_a_document(session, requirement.source_document_id, user.id)
     overview = await get_a_document(session, outcome.source_document_id, user.id)
+    if brief.document_type != DocumentType.ASSESSMENT_BRIEF or overview.document_type != DocumentType.COMPONENT_OVERVIEW:
+        raise ApplicationError(422, "invalid_coverage_link", "Expected assessment brief and component overview")
     if brief.paper_id != overview.paper_id:
         raise ApplicationError(422, 'invalid_coverage_link', 'Both documents must belong to the same paper')
     brief_id, overview_id = brief.id, overview.id
@@ -110,8 +112,12 @@ async def review_link(link_id: UUID, payload: SourceItemLinkUpdate, session: Ses
         link.rationale = payload.rationale
     await session.commit()
     await session.refresh(link)
-    outcome_ids = select(SourceItem.id).where(SourceItem.source_document_id == overview_id, SourceItem.item_type == ItemType.LEARNING_OUTCOME)
-    requirement_ids = select(SourceItem.id).where(SourceItem.source_document_id == brief_id, SourceItem.item_type == ItemType.ASSESSMENT_REQUIREMENT)
+    outcome_ids = select(SourceItem.id).where(SourceItem.source_document_id == overview_id, SourceItem.item_type == outcome.item_type)
+    requirement_ids = select(SourceItem.id).where(SourceItem.source_document_id == brief_id, SourceItem.item_type == requirement.item_type)
+    if outcome.label == 'learning_outcome':
+        outcome_ids = outcome_ids.where(SourceItem.label == 'learning_outcome')
+    if requirement.label == 'assessment_task':
+        requirement_ids = requirement_ids.where(SourceItem.label == 'assessment_task')
     total = (await session.execute(select(func.count()).select_from(SourceItem).where(SourceItem.id.in_(outcome_ids)))).scalar_one()
     confirmed = (await session.execute(select(func.count(func.distinct(SourceItemLink.to_item_id))).where(
         SourceItemLink.from_item_id.in_(requirement_ids), SourceItemLink.to_item_id.in_(outcome_ids),

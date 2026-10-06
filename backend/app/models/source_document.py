@@ -30,6 +30,8 @@ class DocumentStatus(StrEnum):
 class SourceDocument(TimestampMixin, Base):
     __tablename__ = "source_documents"
     __table_args__ = (
+        CheckConstraint("document_type IN ('component_overview', 'assessment_brief', 'rubric')", name='source_document_type'),
+        CheckConstraint("status IN ('pending', 'processing', 'extracted', 'completed', 'embedding_failed', 'failed')", name='source_document_status'),
         Index("ix_source_documents_metadata_gin", "metadata_json", postgresql_using="gin"),
         CheckConstraint("assessment_number IS NULL OR assessment_number > 0", name="positive_assessment_number"),
         CheckConstraint("document_type != 'component_overview' OR assessment_number IS NULL", name="overview_has_no_assessment"),
@@ -41,7 +43,7 @@ class SourceDocument(TimestampMixin, Base):
     owner: Mapped["User | None"] = relationship(back_populates="documents")
     paper_id: Mapped[UUID] = mapped_column(ForeignKey("papers.id", ondelete="CASCADE"), index=True)
     paper: Mapped["Paper"] = relationship(back_populates="documents")
-    document_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType, native_enum=False, create_constraint=True, name="source_document_type", values_callable=lambda e: [v.value for v in e]))
+    document_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType, native_enum=False, create_constraint=False, name="source_document_type", values_callable=lambda e: [v.value for v in e]))
     # Assessment number is the number that appears in the assessment brief and rubric titles, e.g. "Assessment 1" or "Assessment 2". It is only applicable to assessment briefs and rubrics, not component overviews.
     assessment_number: Mapped[int | None] = mapped_column(nullable=True)
     replaces_document_id: Mapped[UUID | None] = mapped_column(ForeignKey("source_documents.id", ondelete="SET NULL"), nullable=True)
@@ -50,5 +52,5 @@ class SourceDocument(TimestampMixin, Base):
     mime_type: Mapped[str] = mapped_column(String(100))
     file_size: Mapped[int] = mapped_column(BigInteger)
     content_hash: Mapped[str] = mapped_column(String(64))
-    status: Mapped[DocumentStatus] = mapped_column(Enum(DocumentStatus, native_enum=False, create_constraint=True, name="source_document_status", values_callable=lambda e: [v.value for v in e]), default=DocumentStatus.PENDING)
+    status: Mapped[DocumentStatus] = mapped_column(Enum(DocumentStatus, native_enum=False, create_constraint=False, name="source_document_status", values_callable=lambda e: [v.value for v in e]), default=DocumentStatus.PENDING)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=dict)

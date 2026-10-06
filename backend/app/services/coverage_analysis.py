@@ -85,6 +85,24 @@ class ClosableJudge(Protocol):
 # ============================================================
 # 1. Load inputs
 # ============================================================
+def select_coverage_items(items, *, label: str, legacy_type: ItemType):
+    """Prefer classifier labels; retain legacy items for unclassified documents."""
+    classified = [item for item in items if item.label == label]
+    if classified:
+        return classified
+    legacy = [item for item in items if item.item_type == legacy_type]
+    if legacy:
+        return legacy
+    # A classified document with no target category is not a coverage input.
+    if any(item.label in {
+        'learning_outcome', 'paper_summarization', 'paper_content_and_engagement',
+        'assessment_overview', 'assessment_task', 'assessment_summary',
+        'assessment_instruction', 'assessment_criteria', 'other',
+    } or 'classification' in (item.metadata_json or {}) for item in items):
+        return []
+    return [item for item in items if item.item_type == ItemType.CONTEXT]
+
+
 async def load_coverage_inputs(
     session_factory,
     *,
@@ -145,10 +163,9 @@ async def load_coverage_inputs(
         # Load learning outcomes
         # ----------------------------------------------------
 
-        outcome_rows = await get_items(
-            session,
-            component_overview.id,
-            item_type=ItemType.LEARNING_OUTCOME,
+        outcome_rows = select_coverage_items(
+            await get_items(session, component_overview.id),
+            label='learning_outcome', legacy_type=ItemType.LEARNING_OUTCOME,
         )
 
         learning_outcomes = [
@@ -162,7 +179,10 @@ async def load_coverage_inputs(
 
         requirements = []
         for brief in briefs:
-            rows = await get_items(session, brief.id, item_type=ItemType.ASSESSMENT_REQUIREMENT)
+            rows = select_coverage_items(
+                await get_items(session, brief.id),
+                label='assessment_task', legacy_type=ItemType.ASSESSMENT_REQUIREMENT,
+            )
             if not rows:
                 raise ApplicationError(409, 'missing_items', f'Assessment brief {brief.id} has no extracted requirements')
             requirements.extend(SourceItemPublic.model_validate(row) for row in rows)

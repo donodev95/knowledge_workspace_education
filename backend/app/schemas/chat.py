@@ -26,6 +26,7 @@ class SourceCitation(BaseModel):
     chunk_index: int
     score: float = Field(ge=0, le=1)
     excerpt: str
+    label: str | None = None
 
 
 class MessagePublic(BaseModel):

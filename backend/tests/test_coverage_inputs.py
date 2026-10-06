@@ -45,6 +45,42 @@ class CoverageInputTests(unittest.TestCase):
         with patch.object(pair_judge,'get_pair_judge',return_value=judge), patch.object(coverage_analysis, 'create_links', side_effect=capture):
             return self.client.post('/api/v1/source-item-links',headers=self.headers(),json=payload)
 
+    def test_classifier_labels_select_only_coverage_chunks_without_metadata(self):
+        brief = self.prepare(2)
+        overview_items = list(self.session.scalars(select(SourceItem).where(SourceItem.source_document_id == self.doc.id)))
+        for index, item in enumerate(overview_items):
+            item.item_type = ItemType.CONTEXT
+            item.label = 'learning_outcome' if index == 0 else 'paper_summarization'
+        task_items = list(self.session.scalars(select(SourceItem).where(SourceItem.source_document_id == brief.id).order_by(SourceItem.chunk_index)))
+        for index, item in enumerate(task_items):
+            item.item_type = ItemType.CONTEXT
+            item.label = 'assessment_task' if index == 0 else 'assessment_instruction'
+        self.session.commit()
+        response = self.run_analysis(FakeJudge(), assessment_document_ids=[str(brief.id)])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.analysis_summary['outcome_count'], 1)
+        self.assertEqual(self.analysis_summary['requirement_count'], 1)
+        self.assertEqual(response.json()['proposed_link_count'], 1)
+        task_items[0].label = 'other'
+        self.session.commit()
+        self.assertEqual(self.run_analysis(FakeJudge(), assessment_document_ids=[str(brief.id)]).status_code, 409)
+
+    def test_context_only_documents_support_analysis_and_review(self):
+        brief = self.prepare()
+        self.items[0].item_type = ItemType.CONTEXT
+        requirement = self.session.scalar(select(SourceItem).where(SourceItem.source_document_id == brief.id))
+        requirement.item_type = ItemType.CONTEXT
+        self.session.commit()
+        response = self.run_analysis(FakeJudge(), assessment_document_ids=[str(brief.id)])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['proposed_link_count'], 2)
+        query = f'/api/v1/source-item-links/proposed?paper_id={self.paper.id}'
+        proposals = self.client.get(query, headers=self.headers()).json()
+        link_id = proposals['outcomes'][0]['supporting_requirements'][0]['link']['id']
+        review = self.client.patch(f'/api/v1/source-item-links/{link_id}', headers=self.headers(), json={'status': 'confirmed'})
+        self.assertEqual(review.status_code, 200, review.text)
+        self.assertEqual(review.json()['confirmed_coverage'], 0.5)
+
     def test_multiple_assessment_briefs_combined(self):
         first = self.prepare(2)
         second = self.prepare(3)
