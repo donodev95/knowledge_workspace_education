@@ -14,7 +14,7 @@ type SourceDocument = {
   original_filename: string;
   status: string;
 };
-type SourceItem = { id: string; label: string | null; content: string };
+type SourceItem = { id: string; source_document_id: string; label: string | null; content: string };
 type AnalysisResponse = { proposed_link_count: number; message: string };
 type Result = {
   proposed_link_count: number;
@@ -270,37 +270,39 @@ export function CoverageAnalysis() {
             {result.outcomes.length === 0 && (
               <p>No proposed links available for the selected documents.</p>
             )}
-            {result.outcomes.map((outcome) => (
-              <details key={outcome.learning_outcome.id}>
-                <summary>
-                  {outcome.learning_outcome.label || "Learning outcome"}:{" "}
-                  {outcome.learning_outcome.content}
-                  <span className="coverage-link-count">
-                    {" "}
-                    · {outcome.supporting_requirements.length}{" "}
-                    {outcome.supporting_requirements.length === 1
-                      ? "link"
-                      : "links"}
-                  </span>
-                </summary>
-                {outcome.supporting_requirements.length === 0 && (
-                  <p>No assessment pairs returned for this outcome.</p>
-                )}
-                {outcome.supporting_requirements.map((pair) => (
-                  <article className="coverage-pair" key={pair.requirement.id}>
-                    <h3>
-                      Assessment {pair.assessment_number} ·{" "}
-                      {pair.requirement.label || "Assessment requirement"}
-                    </h3>
-                    <details className="coverage-requirement-content">
-                      <summary>View</summary>
-                      <p>{pair.requirement.content}</p>
-                      {pair.link.rationale && <p>{pair.link.rationale}</p>}
-                    </details>
-                  </article>
-                ))}
-              </details>
-            ))}
+            {result.outcomes.map((outcome) => {
+              const groups = new Map<string, typeof outcome.supporting_requirements>();
+              for (const pair of outcome.supporting_requirements) {
+                const id = pair.requirement.source_document_id;
+                groups.set(id, [...(groups.get(id) || []), pair]);
+              }
+              return (
+                <details className="coverage-outcome" key={outcome.learning_outcome.id}>
+                  <summary>
+                    <span className="coverage-outcome-heading">
+                      <strong>{displayCategory(outcome.learning_outcome.label, "Learning outcome")}</strong>
+                      <span className="coverage-link-count">{outcome.supporting_requirements.length} proposed {outcome.supporting_requirements.length === 1 ? "link" : "links"}</span>
+                    </span>
+                    <span className="coverage-outcome-text">{outcome.learning_outcome.content}</span>
+                  </summary>
+                  {groups.size === 0 && <p>No assessment pairs returned for this outcome.</p>}
+                  {Array.from(groups, ([documentId, pairs]) => {
+                    const document = documents.find((doc) => doc.id === documentId);
+                    return <details className="coverage-assessment-group" key={documentId}>
+                      <summary>
+                        <strong>{document ? documentName(document) : `Assessment ${pairs[0].assessment_number ?? "brief"}`}</strong>
+                        <span className="coverage-link-count">{pairs.length} proposed {pairs.length === 1 ? "link" : "links"}</span>
+                      </summary>
+                      {pairs.map((pair) => <article className="coverage-pair" key={pair.link.id}>
+                        <h3>{displayCategory(pair.requirement.label, "Assessment task")}</h3>
+                        <ExpandableTask content={pair.requirement.content} />
+                        {pair.link.rationale && <p>{pair.link.rationale}</p>}
+                      </article>)}
+                    </details>;
+                  })}
+                </details>
+              );
+            })}
           </section>
         ) : (
           !error && (
@@ -329,4 +331,22 @@ export function CoverageAnalysis() {
       </main>
     </div>
   );
+}
+
+
+function displayCategory(label: string | null, fallback: string) {
+  if (!label) return fallback;
+  const text = label.replaceAll("_", " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function ExpandableTask({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const limit = 280;
+  const long = content.length > limit;
+  return <div className="coverage-task-description">
+    <p>{expanded || !long ? content : `${content.slice(0, limit).trimEnd()}…`}</p>
+    {long && <button type="button" className="coverage-read-more" aria-expanded={expanded}
+      onClick={() => setExpanded((value) => !value)}>{expanded ? "Read less" : "Read more"}</button>}
+  </div>;
 }

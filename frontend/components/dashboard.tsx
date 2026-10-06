@@ -186,7 +186,7 @@ export function CreatePaper({
             placeholder="e.g. COMP101"
             required
             maxLength={100}
-            pattern=".*\\S.*"
+            pattern={".*\\S.*"}
           />
         </label>
         <label>
@@ -196,7 +196,7 @@ export function CreatePaper({
             placeholder="e.g. Introduction to Computing"
             required
             maxLength={500}
-            pattern=".*\\S.*"
+            pattern={".*\\S.*"}
           />
         </label>
         <button className="secondary" disabled={busy}>
