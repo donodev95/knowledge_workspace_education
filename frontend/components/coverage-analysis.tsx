@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { CoverageResult, Paper, useWorkspace } from "@/store/workspace";
+import { Paper, useWorkspace } from "@/store/workspace";
 
 type SourceDocument = {
   id: string;
@@ -14,11 +14,18 @@ type SourceDocument = {
   original_filename: string;
   status: string;
 };
-type Result = CoverageResult & {
-  outcome_count: number;
-  requirement_count: number;
-  confirmed_coverage: number;
-  proposed_links: unknown[];
+type SourceItem = { id: string; label: string | null; content: string };
+type AnalysisResponse = { proposed_link_count: number; message: string };
+type Result = {
+  proposed_link_count: number;
+  outcomes: {
+    learning_outcome: SourceItem;
+    supporting_requirements: {
+      requirement: SourceItem;
+      assessment_number: number | null;
+      link: { id: string; status: string; rationale: string | null };
+    }[];
+  }[];
 };
 const readyStatuses = new Set(["extracted", "completed", "embedding_failed"]);
 const documentName = (doc: SourceDocument) =>
@@ -30,10 +37,11 @@ export function CoverageAnalysis() {
   const [documents, setDocuments] = useState<SourceDocument[]>([]);
   const [paperId, setPaperId] = useState("");
   const [overviewId, setOverviewId] = useState("");
-  const [assessmentId, setAssessmentId] = useState("");
+  const [assessmentIds, setAssessmentIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [result, setResult] = useState<Result | null>(null);
   const requestRef = useRef<AbortController | null>(null);
 
@@ -71,30 +79,38 @@ export function CoverageAnalysis() {
   const assessments = paperDocuments.filter(
     (doc) => doc.document_type === "assessment_brief",
   );
-  const assessment = assessments.find((doc) => doc.id === assessmentId);
   const canAnalyze =
-    !loading && !busy && overviewId && assessment?.assessment_number;
+    !loading && !busy && overviewId && assessmentIds.length > 0;
 
   async function analyze(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!canAnalyze || !assessment) return;
+    if (!canAnalyze) return;
     const controller = new AbortController();
     requestRef.current = controller;
     setBusy(true);
     setError("");
     setResult(null);
+    setNotice("");
     try {
-      const summary = await api<Result>("/source-item-links", token, {
+      const summary = await api<AnalysisResponse>("/source-item-links", token, {
         method: "POST",
         signal: controller.signal,
         body: JSON.stringify({
           paper_id: paperId,
-          assessment_number: assessment.assessment_number,
           overview_document_id: overviewId,
-          assessment_document_id: assessmentId,
+          assessment_document_ids: assessmentIds,
         }),
       });
-      if (!controller.signal.aborted) setResult(summary);
+      if (controller.signal.aborted) return;
+      setNotice(summary.message);
+      const params = new URLSearchParams({ paper_id: paperId, overview_document_id: overviewId });
+      assessmentIds.forEach((id) => params.append("assessment_document_ids", id));
+      const proposals = await api<Result>(
+        `/source-item-links/proposed?${params}`,
+        token,
+        { signal: controller.signal },
+      );
+      if (!controller.signal.aborted) setResult(proposals);
     } catch (e) {
       if (!controller.signal.aborted)
         setError(
@@ -123,8 +139,9 @@ export function CoverageAnalysis() {
                 onChange={(e) => {
                   setPaperId(e.target.value);
                   setOverviewId("");
-                  setAssessmentId("");
+                  setAssessmentIds([]);
                   setResult(null);
+                  setNotice("");
                   setError("");
                 }}
               >
@@ -154,6 +171,7 @@ export function CoverageAnalysis() {
                     onChange={(e) => {
                       setOverviewId(e.target.checked ? doc.id : "");
                       setResult(null);
+                      setNotice("");
                     }}
                   />
                   <span>
@@ -169,23 +187,24 @@ export function CoverageAnalysis() {
               )}
             </fieldset>
             <fieldset className="coverage-document-options" disabled={!paperId}>
-              <legend>Task assessment document</legend>
+              <legend>Task assessment documents</legend>
               <p className="coverage-selection-hint">
                 {!paperId
                   ? "Select a paper first."
-                  : "Choose one assessment brief."}
+                  : "Choose one or more assessment briefs."}
               </p>
               {assessments.map((doc) => (
                 <label className="coverage-document-option" key={doc.id}>
                   <input
                     type="checkbox"
-                    checked={assessmentId === doc.id}
+                    checked={assessmentIds.includes(doc.id)}
                     disabled={
                       !readyStatuses.has(doc.status) || !doc.assessment_number
                     }
                     onChange={(e) => {
-                      setAssessmentId(e.target.checked ? doc.id : "");
+                      setAssessmentIds((ids) => e.target.checked ? [...ids, doc.id] : ids.filter((id) => id !== doc.id));
                       setResult(null);
+                      setNotice("");
                     }}
                   />
                   <span>
@@ -230,48 +249,33 @@ export function CoverageAnalysis() {
           </div>
         ) : result ? (
           <section className="coverage-results" aria-label="Analysis results">
+            <p className="notice" role="status">{notice}</p>
             <div className="coverage-metrics">
               <div className="panel">
-                <strong>{result.outcome_count}</strong>
-                <span>Learning outcomes</span>
-              </div>
-              <div className="panel">
-                <strong>{result.requirement_count}</strong>
-                <span>Assessment requirements</span>
-              </div>
-              <div className="panel">
-                <strong>{result.proposed_links.length}</strong>
+                <strong>{result.proposed_link_count}</strong>
                 <span>Proposed mappings</span>
               </div>
-              <div className="panel">
-                <strong>{Math.round(result.confirmed_coverage * 100)}%</strong>
-                <span>Confirmed coverage</span>
-              </div>
             </div>
-            {result.outcome_reviews.map((outcome) => (
+            {result.outcomes.length === 0 && (
+              <p>No proposed links available for the selected documents.</p>
+            )}
+            {result.outcomes.map((outcome) => (
               <details key={outcome.learning_outcome.id}>
                 <summary>
                   {outcome.learning_outcome.label || "Learning outcome"}:{" "}
                   {outcome.learning_outcome.content}
                 </summary>
-                {outcome.pairs.length === 0 && (
+                {outcome.supporting_requirements.length === 0 && (
                   <p>No assessment pairs returned for this outcome.</p>
                 )}
-                {outcome.pairs.map((pair) => (
-                  <article
-                    className="coverage-pair"
-                    key={pair.task_requirement.id}
-                  >
+                {outcome.supporting_requirements.map((pair) => (
+                  <article className="coverage-pair" key={pair.requirement.id}>
                     <h3>
-                      {pair.task_requirement.label || "Assessment requirement"}
+                      {pair.requirement.label || "Assessment requirement"}
                     </h3>
-                    <p>{pair.task_requirement.content}</p>
-                    <span>
-                      {(pair.verdict || "Not evaluated").replaceAll("_", " ")}
-                      {pair.link ? ` · ${pair.link.status}` : ""}
-                    </span>
-                    {pair.rationale && <p>{pair.rationale}</p>}
-                    {pair.error && <p className="error">{pair.error}</p>}
+                    <p>{pair.requirement.content}</p>
+                    <span>Assessment {pair.assessment_number} · {pair.link.status}</span>
+                    {pair.link.rationale && <p>{pair.link.rationale}</p>}
                   </article>
                 ))}
               </details>
@@ -293,7 +297,7 @@ export function CoverageAnalysis() {
                 (paperId &&
                   (overviews.length === 0 || assessments.length === 0))
                   ? "Upload a component overview containing learning outcomes and an assessment brief containing tasks."
-                  : "Select a paper, learning outcome document and assessment brief in the sidebar, then perform the analysis."}
+                  : "Select a paper, learning outcome document and assessment briefs in the sidebar, then perform the analysis."}
               </p>
               <Link className="primary" href="/documents">
                 Upload documents →

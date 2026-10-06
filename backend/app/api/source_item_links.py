@@ -10,18 +10,28 @@ from backend.app.db.session import SessionDep, DatabaseDep
 from backend.app.core.errors import ApplicationError
 from backend.app.models import SourceItem, SourceItemLink, SourceDocument, ItemType, LinkStatus
 from backend.app.schemas.source import SourceItemPublic, SourceItemLinkPublic, SourceItemLinkUpdate
-from backend.app.schemas.coverage import CoverageRequest, CoverageSummary, ProposedLinksSummary, OutcomeProposals, ProposedRequirement
+from backend.app.schemas.coverage import CoverageRequest, CoverageAnalysisResponse, ProposedLinksSummary, OutcomeProposals, ProposedRequirement
 from backend.app.llm import pair_judge
 from backend.app.services import coverage_analysis
 
 router = APIRouter(prefix='/source-item-links', tags=['source item links'])
 
 
-@router.post('', response_model=CoverageSummary)
+@router.post('', response_model=CoverageAnalysisResponse)
 async def create_link(payload: CoverageRequest, database: DatabaseDep, user: CurrentUserDep, settings: SettingsDep):
-    return await coverage_analysis.create_links(
-        database.sessions, **payload.model_dump(), owner_id=user.id,
-        judge=pair_judge.get_pair_judge(settings),
+    judge = pair_judge.get_pair_judge(settings)
+    try:
+        summary = await coverage_analysis.create_links(
+            database.sessions, **payload.model_dump(), owner_id=user.id, judge=judge,
+        )
+    finally:
+        close = getattr(judge, 'close', None)
+        if close is not None:
+            await close()
+    count = len(summary.proposed_links)
+    return CoverageAnalysisResponse(
+        proposed_link_count=count,
+        message=f"{count} proposed links available." if count else "No link was created.",
     )
 
 
@@ -31,10 +41,11 @@ async def list_proposed_links(
     assessment_number: int | None = Query(default=None, ge=1),
     overview_document_id: UUID | None = None,
     assessment_document_id: UUID | None = None,
+    assessment_document_ids: list[UUID] | None = Query(default=None),
 ):
     """Group stored proposals by outcome across document versions unless filtered."""
     await get_a_paper(session, paper_id, user.id)
-    for document_id in (overview_document_id, assessment_document_id):
+    for document_id in [overview_document_id, assessment_document_id, *(assessment_document_ids or [])]:
         if document_id is not None:
             document = await get_a_document(session, document_id, user.id)
             if document.paper_id != paper_id:
@@ -59,6 +70,8 @@ async def list_proposed_links(
         statement = statement.where(overview.id == overview_document_id)
     if assessment_document_id is not None:
         statement = statement.where(brief.id == assessment_document_id)
+    if assessment_document_ids is not None:
+        statement = statement.where(brief.id.in_(assessment_document_ids))
     rows = (await session.execute(statement)).all()
     groups: dict[UUID, OutcomeProposals] = {}
     for link, requirement_item, outcome_item, number in rows:

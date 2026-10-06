@@ -1,6 +1,6 @@
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
@@ -63,6 +63,7 @@ class CoverageInputs:
         tuple[UUID, UUID],
         SourceItemLinkPublic,
     ]
+    brief_ids: list[UUID] = field(default_factory=list)
 
 @dataclass
 class AnalysisResult:
@@ -87,10 +88,11 @@ async def load_coverage_inputs(
     session_factory,
     *,
     paper_id: UUID,
-    assessment_number: int,
+    assessment_number: int | None = None,
     owner_id: UUID,
     overview_document_id: UUID | None = None,
-    assessment_document_id: UUID | None = None,
+    assessment_document_id: UUID | list[UUID] | None = None,
+    assessment_document_ids: list[UUID] | None = None,
 ) -> CoverageInputs:
     """Load outcomes, requirements, and existing links."""
 
@@ -115,15 +117,28 @@ async def load_coverage_inputs(
             require_extracted=True,
         )
 
-        assessment_brief = await get_document(
-            session,
-            paper_id=paper_id,
-            owner_id=owner_id,
-            document_type=DocumentType.ASSESSMENT_BRIEF,
-            assessment_number=assessment_number,
-            document_id=assessment_document_id,
-            require_extracted=True,
+        selected_ids = assessment_document_ids or (
+            assessment_document_id if isinstance(assessment_document_id, list)
+            else [assessment_document_id] if assessment_document_id else []
         )
+        briefs = []
+        if selected_ids:
+            for document_id in dict.fromkeys(selected_ids):
+                selected = await get_a_document(session, document_id, owner_id)
+                briefs.append(await get_document(
+                    session, paper_id=paper_id, owner_id=owner_id,
+                    document_type=DocumentType.ASSESSMENT_BRIEF,
+                    assessment_number=selected.assessment_number,
+                    document_id=document_id, require_extracted=True,
+                ))
+        else:
+            if assessment_number is None:
+                raise ApplicationError(422, 'missing_assessments', 'Select at least one assessment brief')
+            briefs.append(await get_document(
+                session, paper_id=paper_id, owner_id=owner_id,
+                document_type=DocumentType.ASSESSMENT_BRIEF,
+                assessment_number=assessment_number, require_extracted=True,
+            ))
 
         # ----------------------------------------------------
         # Load learning outcomes
@@ -144,16 +159,12 @@ async def load_coverage_inputs(
         # Load assessment requirements
         # ----------------------------------------------------
 
-        requirement_rows = await get_items(
-            session,
-            assessment_brief.id,
-            item_type=ItemType.ASSESSMENT_REQUIREMENT,
-        )
-
-        requirements = [
-            SourceItemPublic.model_validate(row)
-            for row in requirement_rows
-        ]
+        requirements = []
+        for brief in briefs:
+            rows = await get_items(session, brief.id, item_type=ItemType.ASSESSMENT_REQUIREMENT)
+            if not rows:
+                raise ApplicationError(409, 'missing_items', f'Assessment brief {brief.id} has no extracted requirements')
+            requirements.extend(SourceItemPublic.model_validate(row) for row in rows)
 
         if not learning_outcomes or not requirements:
             raise ApplicationError(
@@ -196,7 +207,8 @@ async def load_coverage_inputs(
 
     return CoverageInputs(
         overview_id=component_overview.id,
-        brief_id=assessment_brief.id,
+        brief_id=briefs[0].id,
+        brief_ids=[brief.id for brief in briefs],
         learning_outcomes=learning_outcomes,
         requirements=requirements,
         existing_links=existing_links,
@@ -576,17 +588,11 @@ async def validate_coverage_access(
         owner_id,
     )
 
-    await get_a_document(
-        session,
-        overview_id,
-        owner_id,
-    )
+    overview = await get_a_document(session, overview_id, owner_id)
 
-    await get_a_document(
-        session,
-        brief_id,
-        owner_id,
-    )
+    brief = await get_a_document(session, brief_id, owner_id)
+    if overview.paper_id != paper_id or brief.paper_id != paper_id:
+        raise ApplicationError(422, "invalid_document_selection", "Documents must belong to the selected paper")
 
 
 async def save_proposed_links(
@@ -600,19 +606,18 @@ async def save_proposed_links(
     requirements: list[SourceItemPublic],
     learning_outcomes: list[SourceItemPublic],
     include_partial: bool,
+    brief_ids: list[UUID] | None = None,
 ) -> list[SourceItemLinkPublic]:
     """Persist positive judgments as proposed links."""
 
     async with session_factory() as session:
 
         # Re-check access immediately before writing.
-        await validate_coverage_access(
-            session,
-            paper_id=paper_id,
-            overview_id=overview_id,
-            brief_id=brief_id,
-            owner_id=owner_id,
-        )
+        for selected_brief_id in brief_ids or [brief_id]:
+            await validate_coverage_access(
+                session, paper_id=paper_id, overview_id=overview_id,
+                brief_id=selected_brief_id, owner_id=owner_id,
+            )
 
         for judgment in judgments:
 
@@ -743,7 +748,7 @@ def build_coverage_summary(
     run_id: UUID,
     started: float,
     paper_id: UUID,
-    assessment_number: int,
+    assessment_number: int | None,
     inputs: CoverageInputs,
     analysis: AnalysisResult,
     links: list[SourceItemLinkPublic],
@@ -797,7 +802,8 @@ def build_coverage_summary(
         assessment_number=assessment_number,
 
         overview_document_id=inputs.overview_id,
-        assessment_document_id=inputs.brief_id,
+        assessment_document_id=inputs.brief_id if len(inputs.brief_ids) <= 1 else None,
+        assessment_document_ids=inputs.brief_ids or [inputs.brief_id],
 
         outcome_count=len(
             inputs.learning_outcomes
@@ -909,11 +915,12 @@ async def create_links(
     session_factory,
     *,
     paper_id: UUID,
-    assessment_number: int,
+    assessment_number: int | None = None,
     owner_id: UUID,
     judge: PairJudge,
     overview_document_id: UUID | None = None,
-    assessment_document_id: UUID | None = None,
+    assessment_document_id: UUID | list[UUID] | None = None,
+    assessment_document_ids: list[UUID] | None = None,
     include_partial: bool = True,
     token_budget: int = 16384,
     time_budget_seconds: int = 600,
@@ -937,6 +944,7 @@ async def create_links(
         owner_id=owner_id,
         overview_document_id=overview_document_id,
         assessment_document_id=assessment_document_id,
+        assessment_document_ids=assessment_document_ids,
     )
 
     logger.info(
@@ -982,6 +990,7 @@ async def create_links(
         owner_id=owner_id,
         overview_id=inputs.overview_id,
         brief_id=inputs.brief_id,
+        brief_ids=inputs.brief_ids,
         judgments=analysis.judgments,
         requirements=inputs.requirements,
         learning_outcomes=inputs.learning_outcomes,
@@ -1007,7 +1016,7 @@ async def create_links(
         run_id=run_id,
         started=started,
         paper_id=paper_id,
-        assessment_number=assessment_number,
+        assessment_number=assessment_number if len(inputs.brief_ids) <= 1 else None,
         inputs=inputs,
         analysis=analysis,
         links=links,

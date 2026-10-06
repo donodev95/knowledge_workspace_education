@@ -150,3 +150,21 @@ and confirmed/rejected links are never overwritten. Ownership checks remain enab
 
 The grouped `outcome_reviews` response is retained. No cache, file exports, or
 batch-history writes are performed. No database migration is required.
+
+### Multiple assessment briefs
+
+`POST /source-item-links` accepts `assessment_document_ids` containing one or more
+assessment-brief UUIDs, together with `paper_id` and optionally
+`overview_document_id`. No assessment number is required for explicit document
+selections. Each selected brief must belong to the owned paper and have completed
+extraction with at least one assessment requirement. Duplicate IDs are deduplicated.
+All selected briefs' extracted requirements are combined for the bounded batch
+analysis; requirement source IDs retain their document provenance. Upload ingestion
+continues to handle extraction before coverage analysis.
+
+Legacy `assessment_number` and singular `assessment_document_id` requests remain
+supported. The latter also accepts a list for compatibility; do not supply it together
+with `assessment_document_ids`. The POST response contains `proposed_link_count`
+and `message`. Fetch saved proposals through `GET /source-item-links/proposed`,
+passing repeated `assessment_document_ids` query parameters and an optional
+`overview_document_id` to restrict the results to selected sources.

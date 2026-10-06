@@ -1053,7 +1053,7 @@ fieldset {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 20px;
+  padding: 10px 20px;
 }
 .coverage-metrics strong {
   font-size: 28px;

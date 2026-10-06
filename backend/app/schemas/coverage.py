@@ -1,7 +1,7 @@
 """Inputs and review results for requirement-to-outcome analysis."""
 from typing import Literal
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.app.schemas.source import SourceItemPublic, SourceItemLinkPublic
 
 Verdict = Literal['addresses', 'partially_addresses', 'does_not_address', 'uncertain']
@@ -9,9 +9,10 @@ Verdict = Literal['addresses', 'partially_addresses', 'does_not_address', 'uncer
 
 class CoverageRequest(BaseModel):
     paper_id: UUID
-    assessment_number: int = Field(ge=1)
+    assessment_number: int | None = Field(default=None, ge=1)
     overview_document_id: UUID | None = None
-    assessment_document_id: UUID | None = None
+    assessment_document_id: UUID | list[UUID] | None = None
+    assessment_document_ids: list[UUID] | None = Field(default=None, min_length=1)
     include_partial: bool = False
     batch_size: int = Field(default=4, ge=1, le=5)
     call_timeout_seconds: int = Field(default=120, ge=1, le=120)
@@ -19,6 +20,16 @@ class CoverageRequest(BaseModel):
     time_budget_seconds: int = Field(default=600, ge=1, le=600)
     refresh_proposals: bool = False
 
+
+    @model_validator(mode='after')
+    def validate_selection(self):
+        if self.assessment_document_ids is not None and self.assessment_document_id is not None:
+            raise ValueError('Use assessment_document_ids or assessment_document_id, not both')
+        if self.assessment_document_id == []:
+            raise ValueError('Select at least one assessment document')
+        if not self.assessment_document_ids and not self.assessment_document_id and self.assessment_number is None:
+            raise ValueError('Select assessment documents or provide an assessment number')
+        return self
 
 
 class PairJudgment(BaseModel):
@@ -78,9 +89,10 @@ class CoverageSummary(BaseModel):
     run_id: UUID
     batches: list[BatchExecution]
     paper_id: UUID
-    assessment_number: int
+    assessment_number: int | None
     overview_document_id: UUID
-    assessment_document_id: UUID
+    assessment_document_id: UUID | None
+    assessment_document_ids: list[UUID] = Field(default_factory=list)
     outcome_count: int
     requirement_count: int
     pair_count: int
@@ -114,3 +126,8 @@ class ProposedLinksSummary(BaseModel):
     paper_id: UUID
     proposed_link_count: int
     outcomes: list[OutcomeProposals]
+
+
+class CoverageAnalysisResponse(BaseModel):
+    proposed_link_count: int = Field(ge=0)
+    message: str
