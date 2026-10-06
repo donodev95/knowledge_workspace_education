@@ -75,7 +75,8 @@ class CoverageInputTests(unittest.TestCase):
         self.prepare(2)
         empty = self.run_analysis(FakeJudge('does_not_address'))
         self.assertEqual(empty.json(), {'proposed_link_count': 0, 'message': 'No link was created.'})
-        created = self.run_analysis(FakeJudge())
+        brief = self.prepare(2)
+        created = self.run_analysis(FakeJudge(), assessment_document_ids=[str(brief.id)])
         self.assertEqual(created.json(), {'proposed_link_count': 2, 'message': '2 proposed links available.'})
 
     def test_list_proposals_grouped_and_protected(self):
@@ -120,19 +121,31 @@ class CoverageInputTests(unittest.TestCase):
         self.assertEqual(len(self.analysis_summary['outcome_reviews']), 5)
         self.assertTrue(all(len(group['pairs']) == 3 for group in self.analysis_summary['outcome_reviews']))
 
-    def test_small_batches_and_negative_results_are_reanalyzed(self):
+    def test_processed_negative_and_uncertain_pairs_are_skipped(self):
         self.prepare(9)
-        judge=FakeJudge('does_not_address')
-        response=self.run_analysis(judge)
-        self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(judge.calls,[4,4,1])
-        self.assertEqual(self.analysis_summary['analyzed_pair_count'],9)
-        self.assertEqual(self.session.scalar(select(func.count()).select_from(CoverageBatchAttempt)),0)
-        again=self.run_analysis(judge)
-        self.assertEqual(self.analysis_summary['model_call_count'],3)
-        self.assertNotIn('cached_pair_count', self.analysis_summary)
-        self.assertNotIn('cached', self.analysis_summary['pairs'][0])
-        self.assertEqual(len(self.analysis_summary['outcomes_with_no_suggested_match']),1)
+        judge = FakeJudge('does_not_address')
+        response = self.run_analysis(judge)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(judge.calls, [4, 4, 1])
+        self.assertEqual(self.analysis_summary['analyzed_pair_count'], 9)
+        self.assertEqual(response.json()['proposed_link_count'], 0)
+        self.assertEqual(self.session.scalar(select(func.count()).select_from(SourceItemLink).where(
+            SourceItemLink.link_type == coverage_analysis.PROCESSED_LINK_TYPE)), 9)
+        again = self.run_analysis(judge)
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(self.analysis_summary['model_call_count'], 0)
+        self.assertEqual(self.analysis_summary['skipped_pair_count'], 9)
+        self.assertEqual(judge.calls, [4, 4, 1])
+        self.assertEqual(len(self.analysis_summary['outcomes_with_no_suggested_match']), 1)
+
+    def test_processed_uncertain_pairs_are_saved_and_skipped(self):
+        self.prepare()
+        judge = FakeJudge('uncertain')
+        self.assertEqual(self.run_analysis(judge).status_code, 200)
+        self.assertEqual(self.analysis_summary['pairs'][0]['verdict'], 'uncertain')
+        self.assertEqual(self.run_analysis(judge).json()['proposed_link_count'], 0)
+        self.assertEqual(judge.calls, [1])
+        self.assertEqual(self.analysis_summary['pairs'][0]['verdict'], 'uncertain')
 
     def test_refresh_preserves_proposals_and_review(self):
         self.prepare()

@@ -13,13 +13,13 @@ async def get_links(
     *,
     from_item_ids: Collection[UUID],
     to_item_ids: Collection[UUID],
-    link_type: str,
+    link_type: str | Collection[str],
 ) -> list[SourceItemLink]:
     """Return existing links between the supplied source item IDs."""
     statement = select(SourceItemLink).where(
         SourceItemLink.from_item_id.in_(from_item_ids),
         SourceItemLink.to_item_id.in_(to_item_ids),
-        SourceItemLink.link_type == link_type,
+        SourceItemLink.link_type.in_([link_type] if isinstance(link_type, str) else link_type),
     )
     result = await session.execute(statement)
     return list(result.scalars().all())

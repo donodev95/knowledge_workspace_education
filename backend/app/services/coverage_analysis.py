@@ -1,7 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import UUID, uuid4
 
 import httpx
@@ -48,6 +48,7 @@ from backend.app.schemas.coverage import (
 )
 logger = get_logger(__name__)
 LINK_TYPE = "addresses_outcome"
+PROCESSED_LINK_TYPE = "coverage_judgment"
 
 @dataclass
 class CoverageInputs:
@@ -192,7 +193,7 @@ async def load_coverage_inputs(
                 outcome.id
                 for outcome in learning_outcomes
             ],
-            link_type=LINK_TYPE,
+            link_type=[LINK_TYPE, PROCESSED_LINK_TYPE],
         )
 
         links = [
@@ -202,7 +203,7 @@ async def load_coverage_inputs(
 
     existing_links = {
         (link.from_item_id, link.to_item_id): link
-        for link in links
+        for link in sorted(links, key=lambda link: link.link_type == LINK_TYPE)
     }
 
     return CoverageInputs(
@@ -235,6 +236,10 @@ def should_analyze_pair(
     existing = existing_links.get(
         (requirement_id, outcome_id)
     )
+
+    # Completed judgments are skipped; refresh is reserved for proposals.
+    if existing is not None and existing.link_type == PROCESSED_LINK_TYPE:
+        return False
 
     # No previous relationship exists.
     if existing is None:
@@ -372,6 +377,14 @@ def validate_batch(
                     **match.model_dump(),
                 )
             )
+
+        for requirement_id, outcome_id in sorted(eligible_pairs, key=lambda pair: (str(pair[0]), str(pair[1]))):
+            if requirement_id == result.requirement_id and outcome_id not in seen_outcomes:
+                judgments.append(PairJudgment(
+                    requirement_id=requirement_id, outcome_id=outcome_id,
+                    verdict="does_not_address",
+                    rationale="No match returned for this outcome in the validated assessment comparison.",
+                ))
 
     return judgments
 
@@ -621,11 +634,7 @@ async def save_proposed_links(
 
         for judgment in judgments:
 
-            if not should_create_link(
-                judgment,
-                include_partial=include_partial,
-            ):
-                continue
+            is_proposal = should_create_link(judgment, include_partial=include_partial)
 
             statement = (
                 insert_for(
@@ -636,7 +645,7 @@ async def save_proposed_links(
                     id=uuid4(),
                     from_item_id=judgment.requirement_id,
                     to_item_id=judgment.outcome_id,
-                    link_type=LINK_TYPE,
+                    link_type=LINK_TYPE if is_proposal else PROCESSED_LINK_TYPE,
                     status=LinkStatus.PROPOSED,
                     rationale=(
                         f"[{judgment.verdict}] "
@@ -667,7 +676,7 @@ async def save_proposed_links(
                 outcome.id
                 for outcome in learning_outcomes
             ],
-            link_type=LINK_TYPE,
+            link_type=[LINK_TYPE, PROCESSED_LINK_TYPE],
         )
 
         return [
@@ -686,6 +695,7 @@ def build_pair_reviews(
     judgments: list[PairJudgment],
     links: list[SourceItemLinkPublic],
     eligible_pairs: set[tuple[UUID, UUID]],
+    executions: list[BatchExecution] | None = None,
 ) -> list[PairReview]:
     """Create PairReview objects only after analysis is complete."""
 
@@ -702,7 +712,7 @@ def build_pair_reviews(
             link.from_item_id,
             link.to_item_id,
         ): link
-        for link in links
+        for link in sorted(links, key=lambda link: link.link_type == LINK_TYPE)
     }
 
     reviews: list[PairReview] = []
@@ -725,6 +735,12 @@ def build_pair_reviews(
                 link=link,
             )
 
+            if key in eligible_pairs and judgment is None:
+                failed = next((execution for execution in executions or []
+                    if requirement.id in execution.requirement_ids and execution.status != "completed"), None)
+                if failed is not None:
+                    review.error = failed.error or "Analysis unavailable"
+
             if judgment:
                 review.verdict = judgment.verdict
                 review.rationale = judgment.rationale
@@ -732,6 +748,19 @@ def build_pair_reviews(
             elif key not in eligible_pairs:
                 # Pair already had an existing decision/link.
                 review.skipped = True
+                if link and link.rationale and link.rationale.startswith("["):
+                    verdict, separator, rationale = link.rationale[1:].partition("] ")
+                    if separator and verdict in {"addresses", "partially_addresses", "does_not_address", "uncertain"}:
+                        review.verdict = cast(
+                            Literal[
+                                "addresses",
+                                "partially_addresses",
+                                "does_not_address",
+                                "uncertain",
+                            ],
+                            verdict,
+                        )
+                        review.rationale = rationale
 
             reviews.append(review)
 
@@ -760,13 +789,13 @@ def build_coverage_summary(
     pending_outcome_ids = {
         link.to_item_id
         for link in links
-        if link.status == LinkStatus.PROPOSED
+        if link.status == LinkStatus.PROPOSED and link.link_type == LINK_TYPE
     }
 
     confirmed_outcome_ids = {
         link.to_item_id
         for link in links
-        if link.status == LinkStatus.CONFIRMED
+        if link.status == LinkStatus.CONFIRMED and link.link_type == LINK_TYPE
     }
 
     unresolved_pairs = [
@@ -822,6 +851,7 @@ def build_coverage_summary(
             for pair in pairs
             if (
                 pair.link
+                and pair.link.link_type == LINK_TYPE
                 and pair.link.status
                 == LinkStatus.PROPOSED
             )
@@ -1006,6 +1036,7 @@ async def create_links(
         analysis.judgments,
         links,
         eligible_pairs,
+        analysis.executions,
     )
 
     # ========================================================

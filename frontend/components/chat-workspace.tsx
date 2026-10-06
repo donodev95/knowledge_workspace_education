@@ -163,7 +163,7 @@ export function ChatWorkspace() {
             {conversations.find((c) => c.id === activeId)?.title ??
               "New conversation"}
           </span>
-          <span className="status-dot">DMV302 · Assessment Brief 1</span>
+          <span className="status-dot">Document questions</span>
         </div>
         <div
           className="messages"
@@ -220,7 +220,7 @@ export function ChatWorkspace() {
           )}
           {sending && (
             <p className="thinking" role="status">
-              Analyzing DMV302 Assessment Brief 1…
+              Searching your documents…
             </p>
           )}
           <div ref={bottom} />
@@ -239,7 +239,7 @@ export function ChatWorkspace() {
               id="question"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder="Run coverage analysis for DMV302 Assessment Brief 1…"
+              placeholder="Ask a question about your documents…"
               maxLength={4000}
               rows={2}
               disabled={sending || loading || editingThread}
@@ -265,8 +265,7 @@ export function ChatWorkspace() {
             </div>
           </form>
           <p className="composer-note">
-            Each request analyzes DMV302 against Assessment Brief 1. Review the
-            proposed links.
+            Answers use your uploaded documents. Use Coverage Analysis to review outcome mappings.
           </p>
         </div>
       </main>
@@ -345,7 +344,7 @@ export function Sidebar({
           </p>
         )}
       </div>
-      <Link className="sidebar-library" href="/dashboard">
+      <Link className="sidebar-library" href="/documents">
         <span>▤</span> Manage your papers <span>↗</span>
       </Link>
       <div className="sidebar-note">
@@ -371,12 +370,14 @@ export function EmptyConversation({
         to understand?
       </h1>
       <p>
-        Check how Assessment Brief 1 covers
-        <br className="desktop-break" /> the DMV302 learning outcomes.
+        Explore your uploaded documents
+        <br className="desktop-break" /> with source-grounded answers.
       </p>
       <div className="prompt-grid">
         {[
-          "Analyze coverage for DMV302 Assessment Brief 1",
+          "Summarize the assessment requirements",
+          "Explain the learning outcomes",
+          "What does the brief say about submission?",
         ].map((text, i) => (
           <button key={text} onClick={() => onPrompt(text)}>
             <span className="prompt-icon">{["▤", "◇", "⇄"][i]}</span>
@@ -385,7 +386,7 @@ export function EmptyConversation({
           </button>
         ))}
       </div>
-      <Link className="text-link" href="/dashboard">
+      <Link className="text-link" href="/documents">
         Add your first paper to get started →
       </Link>
     </section>

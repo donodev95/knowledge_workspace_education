@@ -1,7 +1,7 @@
 """Bounded LangGraph workflow for owner-scoped grounded answers."""
 
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
@@ -9,7 +9,6 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agents.providers import AnswerProvider
@@ -17,13 +16,9 @@ from backend.app.agents.types import INSUFFICIENT_EVIDENCE, AgentStreamEvent, Ev
 from backend.app.core.config import Settings
 from backend.app.ingestion.embeddings import EmbeddingProvider, validate_embeddings
 from backend.app.models.message import Message
-from backend.app.models.paper import Paper
 from backend.app.retrieval.search import search_chunks
-from backend.app.schemas.coverage import CoverageRequest
-from backend.app.services.coverage_analysis import create_links
-from backend.app.llm.pair_judge import get_pair_judge
 
-QUERY_CATEGORIES = Literal["conversation", "knowledge", "coverage_analysis"]
+QUERY_CATEGORIES = Literal["conversation", "knowledge"]
 
 class AgentState(TypedDict, total=False):
     """Mutable state passed between explicit answering stages."""
@@ -39,8 +34,11 @@ class AgentState(TypedDict, total=False):
 
 
 def classify_query(query: str) -> QUERY_CATEGORIES:
-    """Run coverage analysis for every new request in the current simplified flow."""
-    return "coverage_analysis"
+    """Route standalone greetings to conversation and questions to retrieval."""
+    normalized = query.strip().lower().strip(" ?.!,")
+    if normalized in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "thanks", "thank you"}:
+        return "conversation"
+    return "knowledge"
 
 
 def rewrite_retrieval_query(query: str) -> str:
@@ -85,46 +83,14 @@ def build_agent_workflow(
     embedding_provider: EmbeddingProvider,
     answer_provider: AnswerProvider,
     history: list[Message],
-    coverage_request: CoverageRequest | None = None,
-    session_factory: Callable | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> Any:
     """Compile the retrieval, retry, generation, and citation-validation graph."""
     async def classify(state: AgentState) -> AgentState:
-        return {"classification": "coverage_analysis" if coverage_request else classify_query(state.get("query", ""))}
+        return {"classification": classify_query(state.get("query", ""))}
 
-    def route_query(state: AgentState) -> Literal["retrieve", "generate", "coverage_analysis"]:
-        category = state.get("classification", "conversation")
-        if category == "coverage_analysis":
-            return "coverage_analysis"
-        return "generate" if category == "conversation" else "retrieve"
-
-    async def analyze_coverage(state: AgentState) -> AgentState:
-        request = coverage_request
-        if request is None:
-            paper_id = (await session.execute(
-                select(Paper.id).where(Paper.owner_id == owner_id, Paper.code == "DMV302")
-            )).scalar_one_or_none()
-            if paper_id is None:
-                return {"answer": "Upload the DMV302 paper and Assessment Brief 1 before running coverage analysis.",
-                        "grounded": False, "coverage": None, "sources": []}
-            request = CoverageRequest(paper_id=paper_id, assessment_number=1)
-        if session_factory is None:
-            raise ValueError("Coverage analysis requires a database session factory")
-        judge = get_pair_judge(settings)
-        try:
-            summary = await create_links(session_factory, owner_id=owner_id, judge=judge,
-                                         **request.model_dump())
-        finally:
-            close = getattr(judge, "close", None)
-            if close is not None:
-                await close()
-        return {"coverage": summary.model_dump(mode="json"), "grounded": False,
-                "sources": [], "answer": (
-                    f"Coverage analysis completed for assessment {summary.assessment_number}. "
-                    f"{len(summary.proposed_links)} proposed links across {summary.outcome_count} learning outcomes. "
-                    f"{len(summary.pairs_needing_review)} pairs need review. Proposed links require human review."
-                )}
+    def route_query(state: AgentState) -> Literal["retrieve", "generate"]:
+        return "generate" if state.get("classification") == "conversation" else "retrieve"
 
     async def retrieve(state: AgentState) -> AgentState:
         query_vectors = await embedding_provider.embed_documents([state.get("retrieval_query", "")])
@@ -204,7 +170,6 @@ def build_agent_workflow(
     # ==================== Define nodes
     # Classify the query as RAG or Non-RAG
     graph.add_node("classify", classify)
-    graph.add_node("coverage_analysis", analyze_coverage)
     # Retrieve the relevant embeddings from the database
     graph.add_node("retrieve", retrieve)
     # Check if the hits (retrieved embeddings) are sufficient to generate a grounded answer
@@ -218,7 +183,6 @@ def build_agent_workflow(
     # ====================  Defines Edges
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_query)
-    graph.add_edge("coverage_analysis", END)
     graph.add_edge("retrieve", "grade_context")
     graph.add_conditional_edges("grade_context", route_context)
     graph.add_edge("rewrite", "retrieve")
@@ -257,8 +221,6 @@ async def run_agent(
     embedding_provider: EmbeddingProvider,
     answer_provider: AnswerProvider,
     history: list[Message],
-    coverage_request: CoverageRequest | None = None,
-    session_factory: Callable | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> AgentState:
     """Run one bounded agent turn and return its validated state."""
@@ -270,8 +232,6 @@ async def run_agent(
         embedding_provider=embedding_provider,
         answer_provider=answer_provider,
         history=history,
-        coverage_request=coverage_request,
-        session_factory=session_factory,
         checkpointer=checkpointer,
     )
     result = await workflow.ainvoke(initial_state(query), config=agent_config(owner_id, thread_id))
@@ -288,8 +248,6 @@ async def stream_agent(
     embedding_provider: EmbeddingProvider,
     answer_provider: AnswerProvider,
     history: list[Message],
-    coverage_request: CoverageRequest | None = None,
-    session_factory: Callable | None = None,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
 ) -> AsyncIterator[AgentStreamEvent]:
     """Stream provider tokens and finish with the validated graph state."""
@@ -301,8 +259,6 @@ async def stream_agent(
         embedding_provider=embedding_provider,
         answer_provider=answer_provider,
         history=history,
-        coverage_request=coverage_request,
-        session_factory=session_factory,
         checkpointer=checkpointer,
     )
     final_state: AgentState | None = None

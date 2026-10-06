@@ -1,65 +1,49 @@
-# import asyncio
+from pprint import pprint
+from laya import Router
 
-# from ollama import AsyncClient
-# from pydantic import BaseModel
+router = Router()
 
+state = """
+Question 1—Clustering (35 %)
+a. Implement clustering algorithms in Python that reads and clusters data.
+o Preprocess the data: handle missing values, encode categorical data, and normalize.
+o Apply KMeans with Euclidean distance and initiate K = 3.
+o Save the source code as 'Clustering.ipynb'.
+o Determine the optimal number of clusters using the Elbow Method
+and validate it using the Silhouette Score.
+o Visualize the clusters in 2D using PCA or t-SNE.
+b. Implement hierarchical clustering methods, such as agglomerative clustering,
+to produce cluster outputs.
+"""
 
-# class TestResponse(BaseModel):
-#     answer: str
+questions = {
+    "component_type": {
+        "type": "choice",
+        "instructions": (
+            "Classify the semantic role of this extracted assessment text."
+        ),
+        "criteria": {
+            "assessment_section": (
+                "A parent assessment section or major question that contains "
+                "multiple assessable requirements."
+            ),
+            "assessment_requirement": (
+                "A specific piece of work, action, question, or evidence "
+                "that the student must complete or demonstrate."
+            ),
+            "instruction": (
+                "General directions about format, submission, tools, naming, "
+                "or how the work should be completed rather than what is assessed."
+            ),
+            "assessment_criterion": (
+                "A criterion used to grade, evaluate, or judge the student's work."
+            ),
+            "other": (
+                "The text does not fit any of the categories above."
+            ),
+        },
+    }
+}
 
-
-# async def main():
-#     client = AsyncClient(
-#         host="http://localhost:11434",
-#         timeout=120,  # Allow time for the model to load.
-#     )
-
-#     # Check that the server is reachable.
-#     models = await client.list()
-#     print("Server connected. Models:", [m.model for m in models.models])
-
-#     # Check async chat and structured JSON output.
-#     response = await client.chat(
-#         model="qwen3.8:latest",
-#         format=TestResponse.model_json_schema(),
-#         options={"temperature": 0},
-#         messages=[
-#             {
-#                 "role": "user",
-#                 "content": 'Return a JSON object with answer set to "OK".',
-#             }
-#         ],
-#     )
-
-#     result = TestResponse.model_validate_json(
-#         response.message.content or ""
-#     )
-#     assert result.answer == "OK", f"Unexpected response: {result}"
-
-#     print("PASS: AsyncClient chat and JSON validation work.")
-#     print(result.model_dump())
-
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
-
-from openai import OpenAI
-import dotenv
-import os
-
-dotenv.load_dotenv()
-KEY = os.getenv("KNOWLEDGE_WORKSPACE_TEST_KEY")
-
-client = OpenAI(
-  api_key=KEY
-)
-
-response = client.responses.create(
-  model="gpt-6-luna",
-  input="write a haiku about ai",
-  store=True,
-)
-
-print(response.output_text);
-
-
+result = router.predict(state, questions)
+pprint(result)

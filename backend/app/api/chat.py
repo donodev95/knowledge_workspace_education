@@ -18,7 +18,6 @@ from backend.app.repositories.threads import get_thread
 from backend.app.schemas.chat import (
     ChatRequest,
     ChatResponse,
-    CoverageSummary,
     MessagePublic,
     SourceCitation,
 )
@@ -53,21 +52,17 @@ async def chat(
             thread_id=thread_id,
             query=query,
             settings=settings,
-            coverage_request=payload.coverage,
-            session_factory=database.sessions,
             checkpointer=checkpointer,
         )
     except ValueError as exc:
         raise ApplicationError(503, "agent_unavailable", str(exc)) from exc
     await session.commit()
-    coverage = state.get("coverage")
     return ChatResponse(
         thread_id=thread_id,
         message_id=message.id,
         answer=message.content,
         grounded=state.get("grounded", False),
         sources=[SourceCitation.model_validate(source) for source in state.get("sources", [])],
-        coverage=CoverageSummary.model_validate(coverage) if coverage is not None else None,
     )
 
 
@@ -97,8 +92,6 @@ async def stream_chat(
                     thread_id=thread_id,
                     question=question,
                     settings=settings,
-                    coverage_request=payload.coverage,
-                    session_factory=database.sessions,
                     checkpointer=checkpointer,
                 ):
                     payload_json = json.dumps(jsonable_encoder(event["data"]))

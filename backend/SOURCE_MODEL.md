@@ -168,3 +168,19 @@ with `assessment_document_ids`. The POST response contains `proposed_link_count`
 and `message`. Fetch saved proposals through `GET /source-item-links/proposed`,
 passing repeated `assessment_document_ids` query parameters and an optional
 `overview_document_id` to restrict the results to selected sources.
+
+### Persisted coverage decisions and reruns
+
+Every validated task–outcome comparison is now persisted in `source_item_links`.
+Accepted full/partial matches use `addresses_outcome`; negative, uncertain, and
+excluded partial results use `coverage_judgment`, with the verdict in the rationale.
+The latter are processing records and do not count as coverage proposals or confirmed
+coverage. Validated omitted matches are recorded as `does_not_address`.
+
+Reruns skip persisted pairs, so a requirement is omitted from model calls when all
+of its selected outcome pairs are processed. New outcomes still trigger their new
+pairs. Explicit `refresh_proposals` retains its proposal refresh behavior; human
+review decisions remain protected. Failed or timed-out batches do not create
+processing records and remain retryable. Existing schema supports the new link type;
+no migration is required. Historical negative results must be analyzed once to
+create processing records.

@@ -7,14 +7,13 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.models.message import MessageRole
-from backend.app.schemas.coverage import CoverageRequest, CoverageSummary
+from backend.app.schemas.coverage import CoverageSummary
 
 
 class ChatRequest(BaseModel):
     """One question submitted to an existing conversation."""
 
     question: str = Field(min_length=1, max_length=4000)
-    coverage: CoverageRequest | None = None
 
 
 class SourceCitation(BaseModel):

@@ -103,8 +103,13 @@ export function CoverageAnalysis() {
       });
       if (controller.signal.aborted) return;
       setNotice(summary.message);
-      const params = new URLSearchParams({ paper_id: paperId, overview_document_id: overviewId });
-      assessmentIds.forEach((id) => params.append("assessment_document_ids", id));
+      const params = new URLSearchParams({
+        paper_id: paperId,
+        overview_document_id: overviewId,
+      });
+      assessmentIds.forEach((id) =>
+        params.append("assessment_document_ids", id),
+      );
       const proposals = await api<Result>(
         `/source-item-links/proposed?${params}`,
         token,
@@ -202,7 +207,11 @@ export function CoverageAnalysis() {
                       !readyStatuses.has(doc.status) || !doc.assessment_number
                     }
                     onChange={(e) => {
-                      setAssessmentIds((ids) => e.target.checked ? [...ids, doc.id] : ids.filter((id) => id !== doc.id));
+                      setAssessmentIds((ids) =>
+                        e.target.checked
+                          ? [...ids, doc.id]
+                          : ids.filter((id) => id !== doc.id),
+                      );
                       setResult(null);
                       setNotice("");
                     }}
@@ -249,7 +258,9 @@ export function CoverageAnalysis() {
           </div>
         ) : result ? (
           <section className="coverage-results" aria-label="Analysis results">
-            <p className="notice" role="status">{notice}</p>
+            <p className="notice" role="status">
+              {notice}
+            </p>
             <div className="coverage-metrics">
               <div className="panel">
                 <strong>{result.proposed_link_count}</strong>
@@ -264,6 +275,13 @@ export function CoverageAnalysis() {
                 <summary>
                   {outcome.learning_outcome.label || "Learning outcome"}:{" "}
                   {outcome.learning_outcome.content}
+                  <span className="coverage-link-count">
+                    {" "}
+                    · {outcome.supporting_requirements.length}{" "}
+                    {outcome.supporting_requirements.length === 1
+                      ? "link"
+                      : "links"}
+                  </span>
                 </summary>
                 {outcome.supporting_requirements.length === 0 && (
                   <p>No assessment pairs returned for this outcome.</p>
@@ -271,11 +289,14 @@ export function CoverageAnalysis() {
                 {outcome.supporting_requirements.map((pair) => (
                   <article className="coverage-pair" key={pair.requirement.id}>
                     <h3>
+                      Assessment {pair.assessment_number} ·{" "}
                       {pair.requirement.label || "Assessment requirement"}
                     </h3>
-                    <p>{pair.requirement.content}</p>
-                    <span>Assessment {pair.assessment_number} · {pair.link.status}</span>
-                    {pair.link.rationale && <p>{pair.link.rationale}</p>}
+                    <details className="coverage-requirement-content">
+                      <summary>View</summary>
+                      <p>{pair.requirement.content}</p>
+                      {pair.link.rationale && <p>{pair.link.rationale}</p>}
+                    </details>
                   </article>
                 ))}
               </details>

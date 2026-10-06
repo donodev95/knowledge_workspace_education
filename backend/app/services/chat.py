@@ -1,6 +1,6 @@
 """Transactional conversation orchestration."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import cast
 from uuid import UUID
 
@@ -14,7 +14,6 @@ from backend.app.core import logging
 from backend.app.core.config import Settings
 from backend.app.ingestion.embeddings import create_embedding_provider
 from backend.app.models.message import Message, MessageRole
-from backend.app.schemas.coverage import CoverageRequest
 from backend.app.repositories.messages import create_message, list_messages
 
 log = logging.get_logger(__name__)
@@ -26,8 +25,6 @@ async def answer_question(
     thread_id: UUID,
     query: str,
     settings: Settings,
-    coverage_request: CoverageRequest | None = None,
-    session_factory: Callable | None = None,
     checkpointer: AgentCheckpointer | None = None,
 ) -> tuple[Message, AgentState]:
     """
@@ -50,8 +47,6 @@ async def answer_question(
         embedding_provider=create_embedding_provider(settings),
         answer_provider=create_answer_provider(settings),
         history=history,
-        coverage_request=coverage_request,
-        session_factory=session_factory,
         checkpointer=checkpointer,
     )
     answer = await create_message(
@@ -74,8 +69,6 @@ async def stream_answer_question(
     thread_id: UUID,
     question: str,
     settings: Settings,
-    coverage_request: CoverageRequest | None = None,
-    session_factory: Callable | None = None,
     checkpointer: AgentCheckpointer | None = None,
 ) -> AsyncIterator[AgentStreamEvent]:
     """Persist a user turn, stream graph tokens, then persist the validated answer."""
@@ -97,8 +90,6 @@ async def stream_answer_question(
         embedding_provider=create_embedding_provider(settings),
         answer_provider=create_answer_provider(settings),
         history=history,
-        coverage_request=coverage_request,
-        session_factory=session_factory,
         checkpointer=checkpointer,
     ):
         if event["event"] == "token":
