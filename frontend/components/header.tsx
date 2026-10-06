@@ -18,10 +18,13 @@ export function Header() {
           Conversations
         </Link>
         <Link
-          href="/dashboard"
-          aria-current={pathname === "/dashboard" ? "page" : undefined}
+          href="/documents"
+          aria-current={pathname === "/documents" ? "page" : undefined}
         >
-          Paper library
+          Library
+        </Link>
+        <Link href="/coverage" aria-current={pathname === "/coverage" ? "page" : undefined}>
+          Coverage Analysis
         </Link>
         {session ? (
           <details className="user-menu">

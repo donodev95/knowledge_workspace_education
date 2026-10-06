@@ -46,5 +46,9 @@ class Message(TimestampMixin, Base):
         JSON().with_variant(JSONB, "postgresql"), default=list, nullable=False
     )
 
+    coverage: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=True
+    )
+
     thread: Mapped["ConversationThread"] = relationship(back_populates="messages")
     owner: Mapped["User"] = relationship(back_populates="messages")

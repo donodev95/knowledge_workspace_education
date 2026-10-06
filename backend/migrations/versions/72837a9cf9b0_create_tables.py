@@ -1,8 +1,8 @@
 """create tables
 
-Revision ID: ba9a1b883b6b
+Revision ID: 72837a9cf9b0
 Revises: 
-Create Date: 2026-10-02 21:21:23.268360
+Create Date: 2026-10-06 10:05:59.976748
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ from pgvector.sqlalchemy import VECTOR
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = 'ba9a1b883b6b'
+revision: str = '72837a9cf9b0'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -78,6 +78,7 @@ def upgrade() -> None:
     sa.Column('role', sa.Enum('USER', 'ASSISTANT', 'SYSTEM', name='message_role', native_enum=False, length=20), nullable=False),
     sa.Column('content', sa.Text(), nullable=False),
     sa.Column('sources', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('coverage', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(['owner_id'], ['users.id'], name=op.f('fk_messages_owner_id_users'), ondelete='CASCADE'),
@@ -87,6 +88,7 @@ def upgrade() -> None:
     op.create_index('ix_messages_thread_created', 'messages', ['thread_id', 'created_at'], unique=False)
     op.create_table('source_documents',
     sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('owner_id', sa.Uuid(), nullable=True),
     sa.Column('paper_id', sa.Uuid(), nullable=False),
     sa.Column('document_type', sa.Enum('component_overview', 'assessment_brief', 'rubric', name='source_document_type', native_enum=False, create_constraint=True), nullable=False),
     sa.Column('assessment_number', sa.Integer(), nullable=True),
@@ -103,11 +105,13 @@ def upgrade() -> None:
     sa.CheckConstraint("document_type != 'component_overview' OR assessment_number IS NULL", name=op.f('ck_source_documents_overview_has_no_assessment')),
     sa.CheckConstraint('assessment_number IS NULL OR assessment_number > 0', name=op.f('ck_source_documents_positive_assessment_number')),
     sa.CheckConstraint('replaces_document_id IS NULL OR replaces_document_id != id', name=op.f('ck_source_documents_not_self_replacement')),
+    sa.ForeignKeyConstraint(['owner_id'], ['users.id'], name=op.f('fk_source_documents_owner_id_users'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['paper_id'], ['papers.id'], name=op.f('fk_source_documents_paper_id_papers'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['replaces_document_id'], ['source_documents.id'], name=op.f('fk_source_documents_replaces_document_id_source_documents'), ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_source_documents'))
     )
     op.create_index('ix_source_documents_metadata_gin', 'source_documents', ['metadata_json'], unique=False, postgresql_using='gin')
+    op.create_index(op.f('ix_source_documents_owner_id'), 'source_documents', ['owner_id'], unique=False)
     op.create_index(op.f('ix_source_documents_paper_id'), 'source_documents', ['paper_id'], unique=False)
     op.create_table('ingestion_jobs',
     sa.Column('id', sa.Uuid(), nullable=False),
@@ -137,7 +141,7 @@ def upgrade() -> None:
     sa.Column('normalized_content', sa.Text(), nullable=False),
     sa.Column('content_hash', sa.String(length=64), nullable=False),
     sa.Column('token_count', sa.Integer(), nullable=False),
-    sa.Column('embedding', VECTOR(dim=1024), nullable=True),
+    sa.Column('embedding', VECTOR(dim=1024).with_variant(sa.JSON(none_as_null=True), 'sqlite'), nullable=True),
     sa.Column('embedding_model', sa.String(length=255), nullable=True),
     sa.Column('metadata_json', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
@@ -185,6 +189,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_ingestion_jobs_owner_id'), table_name='ingestion_jobs')
     op.drop_table('ingestion_jobs')
     op.drop_index(op.f('ix_source_documents_paper_id'), table_name='source_documents')
+    op.drop_index(op.f('ix_source_documents_owner_id'), table_name='source_documents')
     op.drop_index('ix_source_documents_metadata_gin', table_name='source_documents', postgresql_using='gin')
     op.drop_table('source_documents')
     op.drop_index('ix_messages_thread_created', table_name='messages')

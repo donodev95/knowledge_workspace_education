@@ -8,7 +8,7 @@ type Document = {
   original_filename: string;
   status: string;
 };
-export function Dashboard() {
+export function Documents() {
   const { session, papers, selectedPaperId, setPapers, selectPaper } =
     useWorkspace();
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -50,7 +50,7 @@ export function Dashboard() {
       <div className="dashboard-heading">
         <div>
           <span className="eyebrow">YOUR RESEARCH, IN ONE PLACE</span>
-          <h1>Paper library</h1>
+          <h1>Library</h1>
           <p>Build the foundation for your next conversation.</p>
         </div>
         <span className="paper-count">

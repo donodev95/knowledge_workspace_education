@@ -1,7 +1,6 @@
 """Transactional conversation orchestration."""
 
-from collections.abc import AsyncIterator
-from pprint import pprint
+from collections.abc import AsyncIterator, Callable
 from typing import cast
 from uuid import UUID
 
@@ -15,6 +14,7 @@ from backend.app.core import logging
 from backend.app.core.config import Settings
 from backend.app.ingestion.embeddings import create_embedding_provider
 from backend.app.models.message import Message, MessageRole
+from backend.app.schemas.coverage import CoverageRequest
 from backend.app.repositories.messages import create_message, list_messages
 
 log = logging.get_logger(__name__)
@@ -26,6 +26,8 @@ async def answer_question(
     thread_id: UUID,
     query: str,
     settings: Settings,
+    coverage_request: CoverageRequest | None = None,
+    session_factory: Callable | None = None,
     checkpointer: AgentCheckpointer | None = None,
 ) -> tuple[Message, AgentState]:
     """
@@ -48,6 +50,8 @@ async def answer_question(
         embedding_provider=create_embedding_provider(settings),
         answer_provider=create_answer_provider(settings),
         history=history,
+        coverage_request=coverage_request,
+        session_factory=session_factory,
         checkpointer=checkpointer,
     )
     answer = await create_message(
@@ -57,6 +61,7 @@ async def answer_question(
         role=MessageRole.ASSISTANT,
         content=state.get("answer", ""),
         sources=state.get("sources", []),
+        coverage=state.get("coverage"),
     )
     
     return answer, state
@@ -69,6 +74,8 @@ async def stream_answer_question(
     thread_id: UUID,
     question: str,
     settings: Settings,
+    coverage_request: CoverageRequest | None = None,
+    session_factory: Callable | None = None,
     checkpointer: AgentCheckpointer | None = None,
 ) -> AsyncIterator[AgentStreamEvent]:
     """Persist a user turn, stream graph tokens, then persist the validated answer."""
@@ -90,6 +97,8 @@ async def stream_answer_question(
         embedding_provider=create_embedding_provider(settings),
         answer_provider=create_answer_provider(settings),
         history=history,
+        coverage_request=coverage_request,
+        session_factory=session_factory,
         checkpointer=checkpointer,
     ):
         if event["event"] == "token":
@@ -106,6 +115,7 @@ async def stream_answer_question(
             role=MessageRole.ASSISTANT,
             content=state.get("answer", ""),
             sources=state.get("sources", []),
+            coverage=state.get("coverage"),
         )
         await session.commit()
         yield {
@@ -116,5 +126,6 @@ async def stream_answer_question(
                 "answer": assistant.content,
                 "grounded": state.get("grounded", False),
                 "sources": state.get("sources", []),
+                "coverage": state.get("coverage"),
             },
         }

@@ -7,12 +7,14 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.models.message import MessageRole
+from backend.app.schemas.coverage import CoverageRequest, CoverageSummary
 
 
 class ChatRequest(BaseModel):
     """One question submitted to an existing conversation."""
 
     question: str = Field(min_length=1, max_length=4000)
+    coverage: CoverageRequest | None = None
 
 
 class SourceCitation(BaseModel):
@@ -37,14 +39,15 @@ class MessagePublic(BaseModel):
     role: MessageRole
     content: str
     sources: list[dict[str, Any]]
+    coverage: CoverageSummary | None = None
     created_at: datetime
 
 
 class ChatResponse(BaseModel):
     """Validated answer with database-owned citations."""
-
     thread_id: UUID
     message_id: UUID
     answer: str
     grounded: bool
     sources: list[SourceCitation]
+    coverage: CoverageSummary | None = None

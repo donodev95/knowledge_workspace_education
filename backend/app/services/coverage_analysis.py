@@ -1,13 +1,3 @@
-"""Analyze assessment coverage and create proposed links.
-
-Workflow:
-    1. Load assessment inputs.
-    2. Determine which requirement/outcome relationships need analysis.
-    3. Ask the LLM to classify requirements against learning outcomes.
-    4. Persist positive relationships as proposed links.
-    5. Build a coverage summary.
-"""
-
 import asyncio
 import time
 from dataclasses import dataclass
@@ -56,17 +46,8 @@ from backend.app.schemas.coverage import (
     BatchExecution,
     OutcomeCoverage,
 )
-
-
 logger = get_logger(__name__)
-
 LINK_TYPE = "addresses_outcome"
-
-
-# ============================================================
-# Data used internally by the coverage workflow
-# ============================================================
-
 
 @dataclass
 class CoverageInputs:
@@ -82,7 +63,6 @@ class CoverageInputs:
         tuple[UUID, UUID],
         SourceItemLinkPublic,
     ]
-
 
 @dataclass
 class AnalysisResult:
@@ -103,8 +83,6 @@ class ClosableJudge(Protocol):
 # ============================================================
 # 1. Load inputs
 # ============================================================
-
-
 async def load_coverage_inputs(
     session_factory,
     *,
@@ -117,11 +95,7 @@ async def load_coverage_inputs(
     """Load outcomes, requirements, and existing links."""
 
     async with session_factory() as session:
-
-        # ----------------------------------------------------
         # Validate paper ownership
-        # ----------------------------------------------------
-
         await get_a_paper(
             session,
             paper_id,

@@ -18,6 +18,7 @@ async def create_message(
     role: MessageRole,
     content: str,
     sources: list[dict[str, Any]] | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> Message:
     """Persist one message under an already authorized owner and thread."""
     message = Message(
@@ -26,6 +27,7 @@ async def create_message(
         role=role,
         content=content,
         sources=sources or [],
+        coverage=coverage,
     )
     session.add(message)
     await session.flush()

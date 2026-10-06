@@ -12,7 +12,7 @@ class CoverageRequest(BaseModel):
     assessment_number: int = Field(ge=1)
     overview_document_id: UUID | None = None
     assessment_document_id: UUID | None = None
-    include_partial: bool = True
+    include_partial: bool = False
     batch_size: int = Field(default=4, ge=1, le=5)
     call_timeout_seconds: int = Field(default=120, ge=1, le=120)
     token_budget: int = Field(default=16384, ge=1024, le=131072)

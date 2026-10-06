@@ -15,7 +15,13 @@ from backend.app.core.errors import ApplicationError
 from backend.app.db.session import DatabaseDep, SessionDep
 from backend.app.repositories.messages import list_messages
 from backend.app.repositories.threads import get_thread
-from backend.app.schemas.chat import ChatRequest, ChatResponse, MessagePublic, SourceCitation
+from backend.app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    CoverageSummary,
+    MessagePublic,
+    SourceCitation,
+)
 from backend.app.services.chat import answer_question, stream_answer_question
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -30,6 +36,7 @@ async def chat(
     settings: SettingsDep,
     checkpointer: CheckpointerDep,
     session: SessionDep,
+    database: DatabaseDep,
 ) -> ChatResponse:
     """Answer from documents scoped to one owned conversation."""
     logger.info("Chat request for thread %s by user %s", thread_id, user.id)
@@ -46,17 +53,21 @@ async def chat(
             thread_id=thread_id,
             query=query,
             settings=settings,
+            coverage_request=payload.coverage,
+            session_factory=database.sessions,
             checkpointer=checkpointer,
         )
     except ValueError as exc:
         raise ApplicationError(503, "agent_unavailable", str(exc)) from exc
     await session.commit()
+    coverage = state.get("coverage")
     return ChatResponse(
         thread_id=thread_id,
         message_id=message.id,
         answer=message.content,
         grounded=state.get("grounded", False),
         sources=[SourceCitation.model_validate(source) for source in state.get("sources", [])],
+        coverage=CoverageSummary.model_validate(coverage) if coverage is not None else None,
     )
 
 
@@ -86,6 +97,8 @@ async def stream_chat(
                     thread_id=thread_id,
                     question=question,
                     settings=settings,
+                    coverage_request=payload.coverage,
+                    session_factory=database.sessions,
                     checkpointer=checkpointer,
                 ):
                     payload_json = json.dumps(jsonable_encoder(event["data"]))
